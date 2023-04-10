@@ -1,0 +1,3 @@
+[submodule "hardware/makecode_arcade_console"]
+	path = hardware/makecode_arcade_console
+	url = https://github.com/pondahai/makecode_arcade_console
