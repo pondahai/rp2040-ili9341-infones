@@ -1,4 +1,4 @@
-# rp2040-ili9341-iinfones
+# rp2040-ili9341-infones
 
 ![](ezgif-1-d75ccea12c.gif)
 
