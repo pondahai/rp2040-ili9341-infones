@@ -108,7 +108,7 @@ BYTE frame_skip_counter=0;
 int frame_column_step=0;
 // #define FRAME_COLUMN_WIDTH 28
 int FRAME_COLUMN_WIDTH=28;
-#define AUDIO_BUF_SIZE 4000
+#define AUDIO_BUF_SIZE 5000
 BYTE snd_buf[AUDIO_BUF_SIZE]={0};
 int buf_residue_size=AUDIO_BUF_SIZE;
 
@@ -421,10 +421,11 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
 
     ++rapidFireCounter;
     bool reset = false;
-    int i = 0;
+    
+    for (int i = 0; i < 2; ++i){
 
-     // = 0;
-    auto &dst = *pdwPad1;
+    
+    auto &dst = i == 0 ? *pdwPad1 : *pdwPad2;
     int v=0;
     if (gpio_get(A)==0)      v |= _AA;
     if (gpio_get(B)==0)      v |= _BB;
@@ -489,7 +490,7 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
         }
 
         prevButtons[i] = *pdwPad1;
-
+    }
     *pdwSystem = reset ? PAD_SYS_QUIT : 0;
 }
 
@@ -595,7 +596,7 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
             // *p++ = {static_cast<short>(l), static_cast<short>(r)};
 
             // *p++ =  w1 * 6 + w2 * 6 /* + w3 * 5*/ /*+ w4 * 3 * 17 + w5 * 2 * 32 */;
-            *p++ =  w1 * 3 + w2 * 6  + w3 * .2  + w4 * .2 + w5 * .2 ;
+            *p++ =  (w1 * 5 + w2 * 6  + w3 * .1  + w4 * .1 + w5 * .1 ) * 1;
             // *p++ = snd_drum[test_i++];
             // if(test_i > sizeof(snd_drum)) test_i = 0;
 
@@ -764,7 +765,7 @@ void __not_in_flash_func(core1_main)()
         /*
          *   (1/22050) * 735 = 33333us
          */
-         sleep_us(16666*3);
+        sleep_us(12850);
 
 
         /*
@@ -804,6 +805,7 @@ static void __not_in_flash_func(blink_led)(void)
 
 // frame timing control
   uint64_t cur_time = time_us_64();
+  uint64_t diff_time = cur_time - last_blink;
   while (last_blink + 16666 > cur_time) {cur_time = time_us_64();}
     gpio_xor_mask(1<<LED_PIN);
     last_blink = cur_time;
@@ -848,18 +850,21 @@ void __not_in_flash_func(InfoNES_LoadFrame)()
         // else frame_skip = false;
             
         /*
-         *   sound process
-         */
-        // for(int i=0;i<735*1.5;i++){
-        //     snd_buf[i]=snd_buf[i*2];
-        // }
-        audio_play_once(snd_buf,735*3);
-        audio_mixer_step();
-        buf_residue_size = AUDIO_BUF_SIZE;
+         *   sound process : 735 samples per frame
+         */  
 
     }
-
-
+    // (AUDIO_BUF_SIZE-buf_residue_size)
+    if(frame_skip_counter == 0){
+        int j=0;
+        for(int i=0;i<(AUDIO_BUF_SIZE-buf_residue_size);i+=1,j++){
+            snd_buf[j]=snd_buf[i];
+        }
+        // snd_buf[j++]=snd_buf[(AUDIO_BUF_SIZE-buf_residue_size)];
+        audio_play_once(snd_buf,j);
+        audio_mixer_step();
+        buf_residue_size = AUDIO_BUF_SIZE;
+    }
 
 /*
  *
@@ -1298,7 +1303,7 @@ int main()
     // 
     // 735 samples per frame
     //
-    audio_init(7,22050);
+    audio_init(7,17159);
 
 
     //tusb_init();
