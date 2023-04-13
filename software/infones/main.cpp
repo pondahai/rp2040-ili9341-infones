@@ -111,6 +111,7 @@ int FRAME_COLUMN_WIDTH=28;
 #define AUDIO_BUF_SIZE 5000
 BYTE snd_buf[AUDIO_BUF_SIZE]={0};
 int buf_residue_size=AUDIO_BUF_SIZE;
+static int display_dma_channel;
 
 // #ifndef DVICONFIG
 // //#define DVICONFIG dviConfig_PicoDVI
@@ -702,7 +703,7 @@ static void display_write_data(const uint8_t *data, size_t length)
 /*
  *  setting column and page, start and stop
  */
-void ili9341_frame_timing_register_init()
+void ili9341_infones_frame_timing_register_init()
 {
         uint8_t command;
         uint8_t data[4];
@@ -1083,8 +1084,14 @@ if(frame_skip) return;
                  spi_write_blocking(DISPLAY_SPI_PORT, (uint8_t *)&scanline_buf_internal[frame_column_step], FRAME_COLUMN_WIDTH*2);
                  // spi_write_blocking(DISPLAY_SPI_PORT, (uint8_t *)&test_color_bar, FRAME_COLUMN_WIDTH*2);
 #endif
-#if 1
+#if 0
                  spi_write_blocking(DISPLAY_SPI_PORT, (uint8_t *)scanline_buf_internal, 256*2);
+#endif
+#if 1
+                dma_channel_wait_for_finish_blocking(display_dma_channel);
+                dma_channel_set_trans_count(display_dma_channel, 256*2, false);
+                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);   
+                dma_channel_wait_for_finish_blocking(display_dma_channel);             
 #endif
                 /* Set CS high to ignore any traffic on SPI bus. */
                 // gpio_put(DISPLAY_PIN_CS, 1);
@@ -1202,6 +1209,19 @@ static void display_spi_master_init()
     uint32_t baud = spi_set_baudrate(DISPLAY_SPI_PORT, DISPLAY_SPI_CLOCK_SPEED_HZ);
     uint32_t peri = clock_get_hz(clk_peri);
     uint32_t sys = clock_get_hz(clk_sys);
+
+// DMA init
+    display_dma_channel = dma_claim_unused_channel(true);
+    dma_channel_config channel_config = dma_channel_get_default_config(display_dma_channel);
+    channel_config_set_transfer_data_size(&channel_config, DMA_SIZE_8);
+    if (spi0 == DISPLAY_SPI_PORT) {
+        channel_config_set_dreq(&channel_config, DREQ_SPI0_TX);
+    } else {
+        channel_config_set_dreq(&channel_config, DREQ_SPI1_TX);
+    }
+    dma_channel_set_config(display_dma_channel, &channel_config, false);
+    dma_channel_set_write_addr(display_dma_channel, &spi_get_hw(DISPLAY_SPI_PORT)->dr, false);
+
 }
 
 void display_init()
@@ -1292,7 +1312,7 @@ int main()
     display_init(); 
     display_clear();
 
-    ili9341_frame_timing_register_init();
+    ili9341_infones_frame_timing_register_init();
 
     line_drawing=false;
 
