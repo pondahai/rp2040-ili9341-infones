@@ -34,7 +34,7 @@ int InfoNES_ReadRom(const char *pszFileName);
 void InfoNES_ReleaseRom();
 
 /* Transfer the contents of work frame on the screen */
-void InfoNES_LoadFrame();
+int InfoNES_LoadFrame();
 
 /* Get a joypad state */
 void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem);
@@ -78,4 +78,5 @@ void InfoNES_MessageBox(const char *pszMsg, ...);
 void InfoNES_PreDrawLine(int line);
 void InfoNES_PostDrawLine(int line);
 
+void RomSelect_PreDrawLine(int line);
 #endif /* !InfoNES_SYSTEM_H_INCLUDED */

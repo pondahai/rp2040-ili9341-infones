@@ -43,6 +43,7 @@
 #include <assert.h>
 #include <pico.h>
 #include <tuple>
+#include <cstdio>
 
 //#include <util/work_meter.h>
 
@@ -63,11 +64,53 @@ enum
 /*  NES resources                                                    */
 /*-------------------------------------------------------------------*/
 
+#pragma region buffers
 /* RAM */
 BYTE RAM[RAM_SIZE];
-
+// Share with romselect.cpp
+void *InfoNes_GetRAM(size_t *size)
+{
+  printf("Acquired RAM Buffer from emulator: %d bytes\n", RAM_SIZE);
+  *size = RAM_SIZE;
+  return SRAM;
+}
 /* SRAM */
 BYTE SRAM[SRAM_SIZE];
+
+/* Character Buffer */
+BYTE ChrBuf[CHRBUF_SIZE];
+
+// Share with romselect.cpp
+void *InfoNes_GetChrBuf(size_t *size)
+{
+  printf("Acquired ChrBuf Buffer from emulator: %d bytes\n", CHRBUF_SIZE);
+  *size = CHRBUF_SIZE;
+  return ChrBuf;
+}
+/* PPU RAM */
+BYTE PPURAM[PPURAM_SIZE];
+// Share with romselect.cpp
+void *InfoNes_GetPPURAM(size_t *size)
+{
+  printf("Acquired PPURAM Buffer from emulator: %d bytes\n", PPURAM_SIZE);
+  *size = PPURAM_SIZE;
+  return PPURAM;
+}
+/* PPU BANK ( 1Kb * 16 ) */
+BYTE *PPUBANK[16];
+/* Sprite RAM */
+BYTE SPRRAM[SPRRAM_SIZE];
+// Share with romselect.cpp
+void *InfoNes_GetSPRRAM(size_t *size)
+{
+  printf("Acquired SPRRAM Buffer from emulator: %d bytes\n", SPRRAM_SIZE);
+  *size = SPRRAM_SIZE;
+  return SPRRAM;
+}
+/* Scanline Table */
+BYTE PPU_ScanTable[263];
+#pragma endregion
+
 bool SRAMwritten = false;
 
 /* ROM */
@@ -87,17 +130,17 @@ BYTE *ROMBANK[4];
 /*  PPU resources                                                    */
 /*-------------------------------------------------------------------*/
 
-/* PPU RAM */
-BYTE PPURAM[PPURAM_SIZE];
+// /* PPU RAM */
+// BYTE PPURAM[PPURAM_SIZE];
 
 /* VROM */
 BYTE *VROM;
 
-/* PPU BANK ( 1Kb * 16 ) */
-BYTE *PPUBANK[16];
+// /* PPU BANK ( 1Kb * 16 ) */
+// BYTE *PPUBANK[16];
 
-/* Sprite RAM */
-BYTE SPRRAM[SPRRAM_SIZE];
+// /* Sprite RAM */
+// BYTE SPRRAM[SPRRAM_SIZE];
 
 /* PPU Register */
 BYTE PPU_R0;
@@ -134,8 +177,8 @@ WORD PPU_Increment;
 /* Current Scanline */
 WORD PPU_Scanline;
 
-/* Scanline Table */
-BYTE PPU_ScanTable[263];
+// /* Scanline Table */
+// BYTE PPU_ScanTable[263];
 
 /* Name Table Bank */
 BYTE PPU_NameTableBank;
@@ -188,8 +231,8 @@ void __not_in_flash_func(InfoNES_SetLineBuffer)(WORD *p, WORD size)
 }
 #endif
 
-/* Character Buffer */
-BYTE ChrBuf[256 * 2 * 8 * 8];
+// /* Character Buffer */
+// BYTE ChrBuf[256 * 2 * 8 * 8];
 
 /* Update flag for ChrBuf */
 BYTE ChrBufUpdate;

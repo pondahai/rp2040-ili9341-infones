@@ -10,13 +10,14 @@
 #include "hardware/timer.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
+#include "hardware/watchdog.h"
 #include <hardware/sync.h>
 #include <pico/multicore.h>
 #include <hardware/flash.h>
 #include <memory>
 #include <math.h>
 //#include <util/dump_bin.h>
-//#include <util/exclusive_proc.h>
+// #include <util/exclusive_proc.h>
 //#include <util/work_meter.h>
 #include <string.h>
 #include <stdarg.h>
@@ -30,10 +31,18 @@
 #include <tusb.h>
 // #include "gamepad.h"
 #include "rom_selector.h"
+#include "menu.h"
+
+#ifdef __cplusplus
+
+#include "ff.h"
+
+#endif
 
 // #include <hagl_hal.h>
 // #include <hagl.h>
-
+// #define ST7789
+// #undef ILI9341
 
 #define DCS_SOFT_RESET                 0x01
 #define DCS_EXIT_SLEEP_MODE            0x11
@@ -49,9 +58,12 @@
 #define DCS_PIXEL_FORMAT_16BIT         0x55 /* 0b01010101 */
 #define DCS_PIXEL_FORMAT_8BIT          0x22 /* 0b00100010 */
 
+#define DCS_ADDRESS_MODE_MIRROR_Y      0x80
+#define DCS_ADDRESS_MODE_MIRROR_X      0x40
 #define DCS_ADDRESS_MODE_SWAP_XY       0x20
 #define DCS_ADDRESS_MODE_BGR           0x08
 #define DCS_ADDRESS_MODE_RGB           0x00
+#define DCS_ADDRESS_MODE_FLIP_X        0x02
 
 
 #define    DISPLAY_PIN_DC 20
@@ -67,8 +79,12 @@
 
 #define    DISPLAY_PIXEL_FORMAT DCS_PIXEL_FORMAT_16BIT
 
-
+#ifdef ILI9341
 #define    DISPLAY_ADDRESS_MODE DCS_ADDRESS_MODE_BGR | DCS_ADDRESS_MODE_SWAP_XY
+#endif
+#ifdef ST7789
+#define    DISPLAY_ADDRESS_MODE DCS_ADDRESS_MODE_RGB | DCS_ADDRESS_MODE_SWAP_XY | DCS_ADDRESS_MODE_MIRROR_Y
+#endif
 
 #define    DISPLAY_OFFSET_X 0
 #define    DISPLAY_OFFSET_Y 0
@@ -118,6 +134,13 @@ static int display_dma_channel;
 // #define DVICONFIG dviConfig_PicoDVISock
 // #endif
 
+#define ERRORMESSAGESIZE 40
+#define GAMESAVEDIR "/SAVES"
+// util::ExclusiveProc exclProc_;
+char *ErrorMessage;
+bool isFatalError = false;
+static FATFS fs;
+char *romName;
 namespace
 {
     constexpr uint32_t CPUFreqKHz = 252000;
@@ -139,7 +162,7 @@ namespace
     static constexpr uintptr_t NES_FILE_ADDR = 0x10080000;
 
    ROMSelector romSelector_;
-//    util::ExclusiveProc exclProc_;
+   // util::ExclusiveProc exclProc_;
 
     enum class ScreenMode
     {
@@ -291,16 +314,16 @@ void saveNVRAM()
     printf("save SRAM\n");
     // exclProc_.setProcAndWait([]
     //                          {
-    //     static_assert((SRAM_SIZE & (FLASH_SECTOR_SIZE - 1)) == 0);
-    //     if (auto addr = getCurrentNVRAMAddr())
-    //     {
-    //         auto ofs = addr - XIP_BASE;
-    //         printf("write flash %x\n", ofs);
-    //         {
-    //             flash_range_erase(ofs, SRAM_SIZE);
-    //             flash_range_program(ofs, SRAM, SRAM_SIZE);
-    //         }
-    //     } });
+        static_assert((SRAM_SIZE & (FLASH_SECTOR_SIZE - 1)) == 0);
+        if (auto addr = getCurrentNVRAMAddr())
+        {
+            auto ofs = addr - XIP_BASE;
+            printf("write flash %x\n", ofs);
+            {
+                flash_range_erase(ofs, SRAM_SIZE);
+                flash_range_program(ofs, SRAM, SRAM_SIZE);
+            }
+         } //});
     printf("done\n");
 
     SRAMwritten = false;
@@ -724,7 +747,24 @@ void ili9341_infones_frame_timing_register_init()
         gpio_put(DISPLAY_PIN_CS, 0);
 
 }
+void st7789_infones_frame_timing_register_init()
+{
+        uint8_t command;
+        uint8_t data[4];
+        int x=0;
 
+
+
+        display_set_address(x+((160-128)/2), 4/2, (x+((160-128)/2)+128-1), (240-4-1)/2);
+
+////
+        /*
+         *   keep chip select active, let the next data be written continuously
+         */
+        gpio_put(DISPLAY_PIN_DC, 1);
+        gpio_put(DISPLAY_PIN_CS, 0);
+
+}
 
 void __not_in_flash_func(core1_main)()
 {
@@ -821,13 +861,13 @@ static void __not_in_flash_func(blink_led)(void)
   // }
 }
 
-
+uint32_t FrameCounter=0;
 uint16_t test_color_bar = 0;
 /*
  *  call from InfoNES_HSync() 
  *  in every frame
  */
-void __not_in_flash_func(InfoNES_LoadFrame)()
+int __not_in_flash_func(InfoNES_LoadFrame)()
 {
 #if 0
     gpio_put(LED_PIN, hw_divider_s32_quotient_inlined(dvi_->getFrameCounter(), 60) & 1);
@@ -942,7 +982,7 @@ void __not_in_flash_func(InfoNES_LoadFrame)()
 
 
 
-
+    return FrameCounter++;
 }
 #if 0
 namespace
@@ -985,6 +1025,11 @@ void __not_in_flash_func(drawWorkMeter)(int line)
     //    util::WorkMeterEnum(160, clocksPerLine * 2, drawWorkMeterUnit);
 }
 #endif
+
+void __not_in_flash_func(RomSelect_PreDrawLine)(int line)
+{
+    RomSelect_SetLineBuffer(scanline_buf_internal, 256);
+}
 
 /*
  *  InfoNES_PreDrawLine and 
@@ -1087,11 +1132,23 @@ if(frame_skip) return;
 #if 0
                  spi_write_blocking(DISPLAY_SPI_PORT, (uint8_t *)scanline_buf_internal, 256*2);
 #endif
-#if 1
+#ifdef ILI9341
                 dma_channel_wait_for_finish_blocking(display_dma_channel);
                 dma_channel_set_trans_count(display_dma_channel, 256*2, false);
                 dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);   
                 dma_channel_wait_for_finish_blocking(display_dma_channel);             
+#endif
+#ifdef ST7789
+    if(screen_y % 2 == 0){
+        int j=0;
+        for(int i=0;i<256;i+=2,j++){
+            scanline_buf_internal[j] = scanline_buf_internal[i];
+        } 
+                dma_channel_wait_for_finish_blocking(display_dma_channel);
+                dma_channel_set_trans_count(display_dma_channel, 128*2, false);
+                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);   
+                dma_channel_wait_for_finish_blocking(display_dma_channel);             
+    }
 #endif
                 /* Set CS high to ignore any traffic on SPI bus. */
                 // gpio_put(DISPLAY_PIN_CS, 1);
@@ -1282,17 +1339,83 @@ void display_init()
 }
 void display_clear()
 {
+#ifdef ILI9341
     display_set_address(0,0,320-1,240-1);
     BYTE pixel[2]={0x00,0x00};
     for(int i=0;i<320*240;i+=1){
         display_write_data(pixel,2);
     }
-
+#endif
+#ifdef ST7789
+    display_set_address(0,0,160-1,128-1);
+    BYTE pixel[2]={0x00,0x00};
+    for(int i=0;i<160*128;i+=1){
+        display_write_data(pixel,2);
+    }
+#endif
   
 
 }
+
+bool initSDCard()
+{
+    FRESULT fr;
+    TCHAR str[40];
+    sleep_ms(1000);
+
+    printf("Mounting SDcard");
+    fr = f_mount(&fs, "", 1);
+    if (fr != FR_OK)
+    {
+        snprintf(ErrorMessage, ERRORMESSAGESIZE, "SD card mount error: %d", fr);
+        printf("%s\n", ErrorMessage);
+        return false;
+    }
+    printf("\n");
+
+    fr = f_chdir("/");
+    if (fr != FR_OK)
+    {
+        snprintf(ErrorMessage, ERRORMESSAGESIZE, "Cannot change dir to / : %d", fr);
+        printf("%s\n", ErrorMessage);
+        return false;
+    }
+    // for f_getcwd to work, set
+    //   #define FF_FS_RPATH        2
+    // in drivers/fatfs/ffconf.h
+    fr = f_getcwd(str, sizeof(str));
+    if (fr != FR_OK)
+    {
+        snprintf(ErrorMessage, ERRORMESSAGESIZE, "Cannot get current dir: %d", fr);
+        printf("%s\n", ErrorMessage);
+        return false;
+    }
+    printf("Current directory: %s\n", str);
+    printf("Creating directory %s\n", GAMESAVEDIR);
+    fr = f_mkdir(GAMESAVEDIR);
+    if (fr != FR_OK)
+    {
+        if (fr == FR_EXIST)
+        {
+            printf("Directory already exists.\n");
+        }
+        else
+        {
+            snprintf(ErrorMessage, ERRORMESSAGESIZE, "Cannot create dir %s: %d", GAMESAVEDIR, fr);
+            printf("%s\n", ErrorMessage);
+            return false;
+        }
+    }
+    return true;
+}
+
 int main()
 {
+    char selectedRom[80];
+    romName = selectedRom;
+    char errMSG[ERRORMESSAGESIZE];
+    errMSG[0] = selectedRom[0] = 0;
+    ErrorMessage = errMSG;
 
     vreg_set_voltage(VREG_VOLTAGE_1_20);
     sleep_ms(100);
@@ -1311,8 +1434,13 @@ int main()
 
     display_init(); 
     display_clear();
-
+#ifdef ILI9341
     ili9341_infones_frame_timing_register_init();
+#endif
+#ifdef ST7789
+    st7789_infones_frame_timing_register_init();
+    APU_Mute = 0;
+#endif
 
     line_drawing=false;
 
@@ -1387,9 +1515,55 @@ int main()
     // 空サンプル詰めとく
     dvi_->getAudioRingBuffer().advanceWritePointer(255);
 #endif
-   multicore_launch_core1(core1_main);
+    // multicore_launch_core1(core1_main);
 
-    InfoNES_Main();
+    // InfoNES_Main();
+
+    isFatalError = !initSDCard();
+    // When a game is started from the menu, the menu will reboot the device.
+    // After reboot the emulator will start the selected game.
+    if (watchdog_caused_reboot() && isFatalError == false)
+    {
+        // Determine loaded rom
+        printf("Rebooted by menu\n");
+        FIL fil;
+        FRESULT fr;
+        size_t tmpSize;
+        printf("Reading current game from %s and starting emulator\n", ROMINFOFILE);
+        fr = f_open(&fil, ROMINFOFILE, FA_READ);
+        if (fr == FR_OK)
+        {
+            size_t r;
+            fr = f_read(&fil, selectedRom, sizeof(selectedRom), &r);        
+            if (fr != FR_OK)
+            {
+                snprintf(ErrorMessage, 40, "Cannot read %s:%d\n", ROMINFOFILE, fr);
+                selectedRom[0] = 0;
+                printf(ErrorMessage);
+            } else {
+                selectedRom[r] = 0;
+            }
+        }
+        else
+        {
+            snprintf(ErrorMessage, 40, "Cannot open %s:%d\n", ROMINFOFILE, fr);
+            printf(ErrorMessage);
+        }
+        f_close(&fil);
+    }
+    while (true)
+    {
+        if (strlen(selectedRom) == 0)
+        {
+            screenMode_ = ScreenMode::NOSCANLINE_8_7;
+            applyScreenMode();
+            menu(NES_FILE_ADDR, ErrorMessage, isFatalError);  // never returns, but reboots upon selecting a game
+        }
+        printf("Now playing: %s\n", selectedRom);
+        romSelector_.init(NES_FILE_ADDR);
+        InfoNES_Main();
+        selectedRom[0] = 0;
+    }
 
     return 0;
 }
