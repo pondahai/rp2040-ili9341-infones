@@ -675,7 +675,7 @@ static void display_write_data(const uint8_t *data, size_t length)
     /* Set CS high to ignore any traffic on SPI bus. */
     gpio_put(DISPLAY_PIN_CS, 1);
 }
- void display_set_address(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
+ void __not_in_flash_func(display_set_address)(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
     uint8_t command;
     uint8_t data[4];
     static uint16_t prev_x1, prev_x2, prev_y1, prev_y2;
@@ -710,7 +710,7 @@ static void display_write_data(const uint8_t *data, size_t length)
         prev_y1 = y1;
         prev_y2 = y2;
     }
-
+    // 
     display_write_command(DCS_WRITE_MEMORY_START);
 }
 ////
@@ -1070,7 +1070,10 @@ void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
 //             }
 //          }
 
-if(frame_skip) return;
+/*
+ *  frame skip
+ */
+// if(frame_skip) return;
 
 
         screen_y = line;
@@ -1096,8 +1099,8 @@ if(frame_skip) return;
          *  less the FRAME_COLUMN_WIDTH, speed up  the frame rate
          */ 
 
-        uint8_t command;
-        uint8_t data[4];
+        // uint8_t command;
+        // uint8_t data[4];
 
 // Continue Write
             // display_write_data(&scanline_buf_internal[x], 2);
@@ -1125,20 +1128,51 @@ if(frame_skip) return;
 #endif
 #ifdef ILI9341
                 dma_channel_wait_for_finish_blocking(display_dma_channel);
+        memcpy(scanline_buf_outgoing,scanline_buf_internal,sizeof(scanline_buf_outgoing));
                 dma_channel_set_trans_count(display_dma_channel, 256*2, false);
-                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);   
-                dma_channel_wait_for_finish_blocking(display_dma_channel);             
+                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_outgoing, true);   
+                // dma_channel_wait_for_finish_blocking(display_dma_channel);             
+// static uint32_t frame_counter=0;
+//         if(screen_y == 4){
+//             display_set_address(0+((320-256)/2), 4, (0+((320-256)/2)+256-1), (120+4-1));
+//             gpio_put(DISPLAY_PIN_DC, 1);
+//             gpio_put(DISPLAY_PIN_CS, 0);
+//         }
+//         if(screen_y == 120+4){
+//             display_set_address(0+((320-256)/2), 120+4, (0+((320-256)/2)+256-1), (240-4-1));
+//             gpio_put(DISPLAY_PIN_DC, 1);
+//             gpio_put(DISPLAY_PIN_CS, 0);
+//         }
+//         if(screen_y < (120+4) ){
+//             if(frame_counter % 2 == 0){
+//                 dma_channel_wait_for_finish_blocking(display_dma_channel);
+//                 dma_channel_set_trans_count(display_dma_channel, 256*2, false);
+//                 dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);   
+//                 dma_channel_wait_for_finish_blocking(display_dma_channel);             
+//             }
+//         }
+//         else{
+//             if(frame_counter % 2 == 1){
+//                 dma_channel_wait_for_finish_blocking(display_dma_channel);
+//                 dma_channel_set_trans_count(display_dma_channel, 256*2, false);
+//                 dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);   
+//                 dma_channel_wait_for_finish_blocking(display_dma_channel);    
+//             }         
+//         }
+//         if(screen_y == 240-4-1){
+//             frame_counter++;
+//         }
 #endif
 #ifdef ST7789
     if(screen_y % 2 == 0){
+        dma_channel_wait_for_finish_blocking(display_dma_channel);
         int j=0;
         for(int i=0;i<256;i+=2,j++){
-            scanline_buf_internal[j] = scanline_buf_internal[i];
+            scanline_buf_outgoing[j] = scanline_buf_internal[i];
         } 
-                dma_channel_wait_for_finish_blocking(display_dma_channel);
-                dma_channel_set_trans_count(display_dma_channel, 128*2, false);
-                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);   
-                dma_channel_wait_for_finish_blocking(display_dma_channel);             
+        dma_channel_set_trans_count(display_dma_channel, 128*2, false);
+        dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_outgoing, true);   
+        // dma_channel_wait_for_finish_blocking(display_dma_channel);             
     }
 #endif
                 /* Set CS high to ignore any traffic on SPI bus. */
@@ -1442,7 +1476,7 @@ int main()
     // 
     // 735 samples per frame
     //
-    audio_init(7,17159);
+    audio_init(7,19477);
 
 
     //tusb_init();
