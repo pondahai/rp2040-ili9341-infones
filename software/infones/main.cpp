@@ -103,7 +103,8 @@
 const uint LED_PIN = PICO_DEFAULT_LED_PIN;
 
 // static hagl_backend_t *display;
-WORD scanline_buf_internal[320];
+WORD scanline_buf_internal_1[320];
+WORD scanline_buf_internal_2[320];
 WORD scanline_buf_outgoing[320];
 // BYTE framebuffer[256*240];
 uint8_t screen_x;
@@ -1019,7 +1020,11 @@ void __not_in_flash_func(drawWorkMeter)(int line)
 
 void __not_in_flash_func(RomSelect_PreDrawLine)(int line)
 {
-    RomSelect_SetLineBuffer(scanline_buf_internal, 256);
+    if(line % 2 == 0){
+        RomSelect_SetLineBuffer(scanline_buf_internal_1, 256);
+    }else{
+        RomSelect_SetLineBuffer(scanline_buf_internal_2, 256);
+    }
 }
 
 /*
@@ -1040,7 +1045,11 @@ void __not_in_flash_func(InfoNES_PreDrawLine)(int line)
 
     currentLineBuffer_ = b;
 #endif
-    InfoNES_SetLineBuffer(scanline_buf_internal, 256);
+    if(line % 2 == 0){
+        InfoNES_SetLineBuffer(scanline_buf_internal_1, 256);
+    }else{
+        InfoNES_SetLineBuffer(scanline_buf_internal_2, 256);
+    }
 }
 
 void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
@@ -1126,11 +1135,17 @@ void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
 #if 0
                  spi_write_blocking(DISPLAY_SPI_PORT, (uint8_t *)scanline_buf_internal, 256*2);
 #endif
+    WORD *fb;
+    if(line % 2 == 0){
+        fb = scanline_buf_internal_1;
+    }else{
+        fb = scanline_buf_internal_2;
+    }        
 #ifdef ILI9341
                 dma_channel_wait_for_finish_blocking(display_dma_channel);
-        memcpy(scanline_buf_outgoing,scanline_buf_internal,sizeof(scanline_buf_outgoing));
+        // memcpy(scanline_buf_outgoing,scanline_buf_internal,sizeof(scanline_buf_outgoing));
                 dma_channel_set_trans_count(display_dma_channel, 256*2, false);
-                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_outgoing, true);   
+                dma_channel_set_read_addr(display_dma_channel, /*(uint8_t *)*/fb, true);   
                 // dma_channel_wait_for_finish_blocking(display_dma_channel);             
 // static uint32_t frame_counter=0;
 //         if(screen_y == 4){
@@ -1168,7 +1183,7 @@ void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
         dma_channel_wait_for_finish_blocking(display_dma_channel);
         int j=0;
         for(int i=0;i<256;i+=2,j++){
-            scanline_buf_outgoing[j] = scanline_buf_internal[i];
+            scanline_buf_outgoing[j] = fb[i];
         } 
         dma_channel_set_trans_count(display_dma_channel, 128*2, false);
         dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_outgoing, true);   
@@ -1476,7 +1491,7 @@ int main()
     // 
     // 735 samples per frame
     //
-    audio_init(7,19477);
+    audio_init(7,19654);
 
 
     //tusb_init();

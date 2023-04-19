@@ -70,6 +70,10 @@ namespace Frens
 				{
 					entries[numberOfEntries++] = romInfo;
 				}
+				else if (!romInfo.IsDirectory && Frens::cstr_endswith(romInfo.Path, ".NES"))
+				{
+					entries[numberOfEntries++] = romInfo;
+				}
 				else
 				{
 					if (romInfo.IsDirectory && strcmp(romInfo.Path, "System Volume Information") != 0 && strcmp(romInfo.Path, "SAVES") != 0 && strcmp(romInfo.Path, "EDFC") != 0)
