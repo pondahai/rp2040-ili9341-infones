@@ -61,7 +61,7 @@ namespace Frens
 		f_opendir(&dir, ".");
 		while (f_readdir(&dir, &file) == FR_OK && file.fname[0] && numberOfEntries < max_entries)
 		{
-			if (strlen(file.fname) < ROMLISTER_MAXPATH)
+			if (strlen(file.fname) < ROMLISTER_MAXPATH && file.fname[0] != '.')
 			{
 				struct RomEntry romInfo;
 				strcpy(romInfo.Path, file.fname);
