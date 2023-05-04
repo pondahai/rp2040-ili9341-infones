@@ -91,14 +91,14 @@
 #include "audio.h"
 
 
-#define UP 9
-#define DN 5
-#define LT 8
-#define RT 6
-#define SL 28
-#define ST 4
-#define A 2
-#define B 3
+#define PIN_UP 9
+#define PIN_DN 5
+#define PIN_LT 8
+#define PIN_RT 6
+#define PIN_SL 28
+#define PIN_ST 4
+#define PIN_A 2
+#define PIN_B 3
 
 const uint LED_PIN = PICO_DEFAULT_LED_PIN;
 
@@ -224,6 +224,7 @@ CC(0xFFFF),CC(0xFF3D),CC(0xBF5C),CC(0x5FA4),CC(0xDFF3),CC(0xB6FB),CC(0xACFB),CC(
 CC(0xE7F5),CC(0x8286),CC(0xE94E),CC(0xD35F),CC(0x5B07),CC(0x0000),CC(0x0000),CC(0x0000),
 CC(0xFFFF),CC(0x3FAF),CC(0xBFC6),CC(0x5FD6),CC(0x3FFE),CC(0x3BFE),CC(0xF6FD),CC(0xD5FE),
 CC(0x34FF),CC(0xF4E7),CC(0x97AF),CC(0xF9B7),CC(0xFE9F),CC(0x0000),CC(0x0000),CC(0x0000),
+
 
 };    
 
@@ -394,14 +395,14 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
     
     auto &dst = i == 0 ? *pdwPad1 : *pdwPad2;
     int v=0;
-    if (gpio_get(A)==0)      v |= _AA;
-    if (gpio_get(B)==0)      v |= _BB;
-    if (gpio_get(ST)==0)      v |= _START;
-    if (gpio_get(SL)==0)      v |= _SELECT;
-    if (gpio_get(LT)==0)      v |= _LEFT;
-    if (gpio_get(RT)==0)      v |= _RIGHT;
-    if (gpio_get(UP)==0)      v |= _UP;
-    if (gpio_get(DN)==0)      v |= _DOWN;
+    if (gpio_get(PIN_A)==0)      v |= _AA;
+    if (gpio_get(PIN_B)==0)      v |= _BB;
+    if (gpio_get(PIN_ST)==0)      v |= _START;
+    if (gpio_get(PIN_SL)==0)      v |= _SELECT;
+    if (gpio_get(PIN_LT)==0)      v |= _LEFT;
+    if (gpio_get(PIN_RT)==0)      v |= _RIGHT;
+    if (gpio_get(PIN_UP)==0)      v |= _UP;
+    if (gpio_get(PIN_DN)==0)      v |= _DOWN;
 
     int rv = v;
         if (rapidFireCounter & 2)
@@ -562,8 +563,8 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
             // int r = w1 * 3 + w2 * 6 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
             // *p++ = {static_cast<short>(l), static_cast<short>(r)};
 
-            // *p++ =  w1 * 6 + w2 * 6 /* + w3 * 5*/ /*+ w4 * 3 * 17 + w5 * 2 * 32 */;
-            *p++ =  (w1 * 5 + w2 * 6  + w3 * .1  + w4 * .1 + w5 * .1 ) * 1;
+            // *p++ =  w1 * 6 + w2 * 6  + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32 ;
+            *p++ =  (w1 * 4 + w2 * 6  + w3 * .1  + w4 * .1 + w5 * 3 ) * 1;
             // *p++ = snd_drum[test_i++];
             // if(test_i > sizeof(snd_drum)) test_i = 0;
 
@@ -594,6 +595,9 @@ extern WORD PC;
 
 
 ////
+/*
+ *
+ */
 static void display_write_command(const uint8_t command)
 {
     /* Set DC low to denote incoming command. */
@@ -853,10 +857,11 @@ int __not_in_flash_func(InfoNES_LoadFrame)()
 /*
  *
  */
+#if 0    
     frame_column_step += FRAME_COLUMN_WIDTH;
     test_color_bar = NesPalette[frame_column_step&63];
     if(frame_column_step > 256) frame_column_step = 0;
-
+#endif
 
     /*
      *   setting frame display column
@@ -1096,7 +1101,7 @@ void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
                 dma_channel_wait_for_finish_blocking(display_dma_channel);
         // memcpy(scanline_buf_outgoing,scanline_buf_internal,sizeof(scanline_buf_outgoing));
                 dma_channel_set_trans_count(display_dma_channel, 256*2, false);
-                dma_channel_set_read_addr(display_dma_channel, /*(uint8_t *)*/fb, true);   
+                dma_channel_set_read_addr(display_dma_channel, fb, true);   
                 // dma_channel_wait_for_finish_blocking(display_dma_channel);             
 // static uint32_t frame_counter=0;
 //         if(screen_y == 4){
@@ -1137,7 +1142,7 @@ void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
             scanline_buf_outgoing[j] = fb[i];
         } 
         dma_channel_set_trans_count(display_dma_channel, 128*2, false);
-        dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_outgoing, true);   
+        dma_channel_set_read_addr(display_dma_channel, scanline_buf_outgoing, true);   
         // dma_channel_wait_for_finish_blocking(display_dma_channel);             
     }
 #endif
@@ -1186,30 +1191,30 @@ int InfoNES_Menu()
 
 
 static void key_init() {
-    gpio_init(UP);
-    gpio_pull_up(UP);
-    gpio_set_dir(UP, GPIO_IN);
-    gpio_init(DN);
-    gpio_pull_up(DN);
-    gpio_set_dir(DN, GPIO_IN);
-    gpio_init(LT);
-    gpio_pull_up(LT);
-    gpio_set_dir(LT, GPIO_IN);
-    gpio_init(RT);
-    gpio_pull_up(RT);
-    gpio_set_dir(RT, GPIO_IN);
-    gpio_init(ST);
-    gpio_pull_up(ST);
-    gpio_set_dir(ST, GPIO_IN);
-    gpio_init(SL);
-    gpio_pull_up(SL);
-    gpio_set_dir(SL, GPIO_IN);
-    gpio_init(A);
-    gpio_pull_up(A);
-    gpio_set_dir(A, GPIO_IN);
-    gpio_init(B);
-    gpio_pull_up(B);
-    gpio_set_dir(B, GPIO_IN);
+    gpio_init(PIN_UP);
+    gpio_pull_up(PIN_UP);
+    gpio_set_dir(PIN_UP, GPIO_IN);
+    gpio_init(PIN_DN);
+    gpio_pull_up(PIN_DN);
+    gpio_set_dir(PIN_DN, GPIO_IN);
+    gpio_init(PIN_LT);
+    gpio_pull_up(PIN_LT);
+    gpio_set_dir(PIN_LT, GPIO_IN);
+    gpio_init(PIN_RT);
+    gpio_pull_up(PIN_RT);
+    gpio_set_dir(PIN_RT, GPIO_IN);
+    gpio_init(PIN_ST);
+    gpio_pull_up(PIN_ST);
+    gpio_set_dir(PIN_ST, GPIO_IN);
+    gpio_init(PIN_SL);
+    gpio_pull_up(PIN_SL);
+    gpio_set_dir(PIN_SL, GPIO_IN);
+    gpio_init(PIN_A);
+    gpio_pull_up(PIN_A);
+    gpio_set_dir(PIN_A, GPIO_IN);
+    gpio_init(PIN_B);
+    gpio_pull_up(PIN_B);
+    gpio_set_dir(PIN_B, GPIO_IN);
     gpio_init(25);
     gpio_set_dir(25, GPIO_OUT);
 
