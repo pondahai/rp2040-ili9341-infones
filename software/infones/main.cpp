@@ -1135,7 +1135,7 @@ void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
 //         }
 #endif
 #ifdef ST7789
-    if(screen_y % 2 == 0){
+    if(line % 2 == 0){
         dma_channel_wait_for_finish_blocking(display_dma_channel);
         int j=0;
         for(int i=0;i<256;i+=2,j++){
@@ -1319,6 +1319,14 @@ void display_init()
 
     display_write_command(DCS_SET_DISPLAY_ON);
     sleep_ms(200);
+// // ENDIAN
+//     display_write_command(0xf6);
+//     uint8_t data1[2]= {0x00,0x01};
+//     display_write_data(data1,2);
+//     uint8_t data2[2]= {0x00,0x00};
+//     display_write_data(data2,2);
+//     uint8_t data3[2]= {0x00,0x20};
+//     display_write_data(data3,2); // 0x0020 = LSB first
 
     /* Enable backlight */
     if (DISPLAY_PIN_BL > 0) {
@@ -1553,6 +1561,11 @@ int main()
         {
             screenMode_ = ScreenMode::NOSCANLINE_8_7;
             applyScreenMode();
+            // try ROM if fatal error
+            if(isFatalError){
+                romSelector_.init(NES_FILE_ADDR);
+                InfoNES_Main();
+            }
             menu(NES_FILE_ADDR, ErrorMessage, isFatalError);  // never returns, but reboots upon selecting a game
         }
         printf("Now playing: %s\n", selectedRom);
