@@ -65,7 +65,6 @@
 #define DCS_ADDRESS_MODE_RGB           0x00
 #define DCS_ADDRESS_MODE_FLIP_X        0x02
 
-
 #ifdef ILI9341
 #define    DISPLAY_SPI_CLOCK_SPEED_HZ 63000000
 #endif
@@ -565,12 +564,18 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
             uint8_t w4 = *wave4++;
             uint8_t w5 = *wave5++;
             //            w3 = w2 = w4 = w5 = 0;
-            // int l = w1 * 6 + w2 * 3 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
-            // int r = w1 * 3 + w2 * 6 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
-            // *p++ = {static_cast<short>(l), static_cast<short>(r)};
+             // int l = w1 * 6 + w2 * 3 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
+             // int r = w1 * 3 + w2 * 6 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
+             // *p++ = {static_cast<short>(l), static_cast<short>(r)};
 
-            // *p++ =  w1 * 6 + w2 * 6  + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32 ;
-            *p++ =  (w1 * 4 + w2 * 6  + w3 * .1  + w4 * .1 + w5 * 3 ) * 1;
+             *p++ =  (w1 * 1 + w2 * 2  + w3 * 1  + w4 * 1 * 5 + w5 * 2 * 8) / 4;
+
+            //*p++ =  (w1 * 4 + w2 * 6  + w3 * .1  + w4 * .1 + w5 * 3 ) * 1;
+            //*p++ =  (w1 * .1 + w2 * .1  + w3 * .1  + w4 * .1 + w5 * .1 ) * 1;
+
+
+            //*p++ =  ((w1>w2)?w1*6:w1*3 + (w1<w2)?w2*6:w2*3 + w3 * 5  + w4 * 3 * 17 + w5 * 2 * 32) / 8;
+
             // *p++ = snd_drum[test_i++];
             // if(test_i > sizeof(snd_drum)) test_i = 0;
 
@@ -719,6 +724,7 @@ void st7789_infones_frame_timing_register_init()
 
 }
 
+#if 0
 void __not_in_flash_func(core1_main)()
 {
 #if 0
@@ -790,7 +796,7 @@ void __not_in_flash_func(core1_main)()
         // sleep_us(130);
     } // while
 }
-
+#endif
 
 
 static void __not_in_flash_func(blink_led)(void)
@@ -1446,6 +1452,7 @@ int main()
     display_clear();
 #ifdef ILI9341
     ili9341_infones_frame_timing_register_init();
+    APU_Mute = 0;
 #endif
 #ifdef ST7789
     st7789_infones_frame_timing_register_init();
@@ -1461,8 +1468,12 @@ int main()
     // 
     // 735 samples per frame
     //
+    #ifdef ILI9341
     audio_init(7,19654);
-
+    #endif
+    #ifdef ST7789
+    audio_init(7,21000);
+    #endif
 
     //tusb_init();
 
