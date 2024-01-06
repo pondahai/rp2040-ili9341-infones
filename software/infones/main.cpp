@@ -410,9 +410,9 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
     if (gpio_get(PIN_DN)==0)      v |= _DOWN;
 
     int rv = v;
-        if (rapidFireCounter & 2)
+        if (rapidFireCounter % 8 == 0)
         {
-            // 15 fire/sec
+            // 
             rv &= ~rapidFireMask[i];
         }
 
@@ -423,15 +423,15 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
         {
             if (pushed & _LEFT)
             {
-                saveNVRAM();
-                romSelector_.prev();
-                reset = true;
+                // saveNVRAM();
+                // romSelector_.prev();
+                // reset = true;
             }
             if (pushed & _RIGHT)
             {
-                saveNVRAM();
-                romSelector_.next();
-                reset = true;
+                // saveNVRAM();
+                // romSelector_.next();
+                // reset = true;
             }
             if (pushed & _START)
             {
@@ -441,10 +441,12 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
             if (pushed & _AA)
             {
                 rapidFireMask[i] ^= _AA;
+                rapidFireCounter = 0;
             }
             if (pushed & _BB)
             {
                 rapidFireMask[i] ^= _BB;
+                rapidFireCounter = 0;
             }
             if (pushed & _UP)
             {
