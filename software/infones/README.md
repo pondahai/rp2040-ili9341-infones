@@ -26,3 +26,7 @@ for ILI9341
 ```
 picotool load ../../../agnes_local/nes/test.nes -t bin -o 0x10080000
 ```
+
+## Credits
+InfoNes is programmed by Jay Kumogata and ported to the Raspberry Pi Pico by Shuichi Takano.
+
