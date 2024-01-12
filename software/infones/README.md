@@ -28,5 +28,5 @@ picotool load ../../../agnes_local/nes/test.nes -t bin -o 0x10080000
 ```
 
 ## Credits
-InfoNes is programmed by Jay Kumogata and ported to the Raspberry Pi Pico by Shuichi Takano.
+Inspired by https://github.com/shuichitakano/pico-infones and https://github.com/fhoedemakers/pico-infonesPlus with thanks to "infones" https://github.com/jay-kumogata/InfoNES
 
