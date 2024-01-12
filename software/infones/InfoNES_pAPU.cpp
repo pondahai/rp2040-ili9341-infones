@@ -512,7 +512,7 @@ int __not_in_flash_func(ApuWriteWave1)(int cycles, int event)
           ApuC1Skip = 0;
         }
 
-        ApuC1EnvVol = 1;
+        ApuC1EnvVol = 15;
         break;
       }
     }
