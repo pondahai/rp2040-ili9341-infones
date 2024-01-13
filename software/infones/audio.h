@@ -2,7 +2,7 @@
 #define AUDIO_H_FILE
 
 #define AUDIO_BUFFER_SIZE 1024
-#define AUDIO_MAX_SOURCES 6
+#define AUDIO_MAX_SOURCES 2
 
 #include <stdint.h>
 
