@@ -115,13 +115,14 @@ WORD scanline_buf_outgoing[320];
 uint8_t screen_x;
 uint8_t screen_x_start;
 uint8_t screen_y;
-bool line_drawing=false;
+// bool line_drawing=false;
 // BYTE frame_skip;
 BYTE frame_skip_counter=0;
 int frame_column_step=0;
 // #define FRAME_COLUMN_WIDTH 28
 int FRAME_COLUMN_WIDTH=28;
-#define AUDIO_BUF_SIZE 735*4
+// #define AUDIO_BUF_SIZE 735*5
+#define AUDIO_BUF_SIZE 2048
 BYTE snd_buf[AUDIO_BUF_SIZE]={0};
 int buf_residue_size=AUDIO_BUF_SIZE;
 static int display_dma_channel;
@@ -535,6 +536,7 @@ int __not_in_flash_func(InfoNES_GetSoundBufferSize)()
 {
    // return dvi_->getAudioRingBuffer().getFullWritableSize();
    
+   // return 735*2;
    return buf_residue_size;
     // return 128;
 }
@@ -558,6 +560,7 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
         }
         // auto p = ring.getWritePointer();
         auto p = &snd_buf[AUDIO_BUF_SIZE-buf_residue_size];
+        // auto p = snd_buf;
 
         int ct = n;
         while (ct--)
@@ -572,7 +575,7 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
              // int r = w1 * 3 + w2 * 6 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
              // *p++ = {static_cast<short>(l), static_cast<short>(r)};
 
-             *p++ =  (((w1 * 2 + w2 * 2)/2)  + w3 * 2  + w4 * 1 * 8 + w5 * 2 * 1) / 4;
+             *p++ =  (((w1 * 2 + w2 * 2)/2)  + w3 * 1  + w4 * 1 * 4 + w5 * 2 * 1) / 4;
 
             //*p++ =  (w1 * 4 + w2 * 6  + w3 * .1  + w4 * .1 + w5 * 3 ) * 1;
             //*p++ =  (w1 * .1 + w2 * .1  + w3 * .1  + w4 * .1 + w5 * .1 ) * 1;
@@ -599,7 +602,7 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
         // ring.advanceWritePointer(n);
         samples -= n;
         buf_residue_size -= n;
-        // one of samples or buf_residue_size must be zero
+        // snd_buf should not be full, just for case
         if(buf_residue_size <= 0) buf_residue_size = AUDIO_BUF_SIZE;
         
     }
@@ -841,7 +844,7 @@ int __not_in_flash_func(InfoNES_LoadFrame)()
     tuh_task();
 #endif
 /*
- *
+ *. blink the led and control speed
  */
     blink_led();
 
@@ -863,14 +866,18 @@ int __not_in_flash_func(InfoNES_LoadFrame)()
     // (AUDIO_BUF_SIZE-buf_residue_size)
     if(frame_skip_counter == 0){
         int j=0;
-        for(int i=0; i<(AUDIO_BUF_SIZE-buf_residue_size); i+=1,j++){
-            snd_buf[j]=snd_buf[i];
-        }
-        // snd_buf[j++]=snd_buf[(AUDIO_BUF_SIZE-buf_residue_size)];
-        audio_play_once(snd_buf,j-1);
-        audio_mixer_step();
+        // for(int i=0; i<(AUDIO_BUF_SIZE-buf_residue_size); i+=1,j++){
+        //     snd_buf[j]=snd_buf[i];
+        // }
+        // // snd_buf[j++]=snd_buf[(AUDIO_BUF_SIZE-buf_residue_size)];
+        // audio_play_once(snd_buf,j-1);
+        int id = audio_play_once(snd_buf,AUDIO_BUF_SIZE-buf_residue_size);        
+        // if (id >= 0) audio_source_set_volume(id, 1024);
         buf_residue_size = AUDIO_BUF_SIZE;
     }
+
+        audio_mixer_step();
+    
 
 /*
  *
@@ -1465,7 +1472,7 @@ int main()
     APU_Mute = 0;
 #endif
 
-    line_drawing=false;
+    // line_drawing=false;
 
     //
     // 
@@ -1478,7 +1485,7 @@ int main()
     audio_init(7,19654);
     #endif
     #ifdef ST7789
-    audio_init(7,22050);
+    audio_init(7,19050);
     // audio_init(7,22050);
     // audio_init(7,44100);
     #endif
