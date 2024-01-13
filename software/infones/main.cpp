@@ -1485,7 +1485,7 @@ int main()
     audio_init(7,19654);
     #endif
     #ifdef ST7789
-    audio_init(7,19050);
+    audio_init(7,20050);
     // audio_init(7,22050);
     // audio_init(7,44100);
     #endif
