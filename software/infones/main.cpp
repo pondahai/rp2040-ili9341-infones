@@ -112,12 +112,13 @@ WORD scanline_buf_internal_1[320];
 WORD scanline_buf_internal_2[320];
 WORD scanline_buf_outgoing[320];
 // BYTE framebuffer[256*240];
-uint8_t screen_x;
-uint8_t screen_x_start;
-uint8_t screen_y;
+// uint8_t screen_x;
+// uint8_t screen_x_start;
+// uint8_t screen_y;
 // bool line_drawing=false;
 // BYTE frame_skip;
-BYTE frame_skip_counter=0;
+volatile bool SoundOutputBuilding = true;
+volatile BYTE frame_skip_counter=0;
 int frame_column_step=0;
 // #define FRAME_COLUMN_WIDTH 28
 int FRAME_COLUMN_WIDTH=28;
@@ -548,6 +549,7 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
 {
     static int test_i=0;
 
+    SoundOutputBuilding = true;
     while (samples)
     {
         // auto &ring = dvi_->getAudioRingBuffer();
@@ -606,7 +608,7 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
         if(buf_residue_size <= 0) buf_residue_size = AUDIO_BUF_SIZE;
         
     }
-
+    SoundOutputBuilding = false;
 }
 
 
@@ -732,9 +734,51 @@ void st7789_infones_frame_timing_register_init()
 
 }
 
-#if 0
+
+static void __not_in_flash_func(blink_led)(void)
+{
+    gpio_xor_mask(1<<LED_PIN);
+}
+static void __not_in_flash_func(speed_control)(void)
+{
+  static uint64_t last_blink = 0;
+
+// frame timing control
+  uint64_t cur_time = time_us_64();
+  uint64_t diff_time = cur_time - last_blink;
+  // 1/60 = 16666 us
+  while (last_blink + (16666) > cur_time) {cur_time = time_us_64();}
+  
+  last_blink = cur_time;
+
+  // blink_led();
+
+  // uint64_t cur_time = time_us_64();
+  // if (last_blink + 16666 < cur_time) {
+  //   gpio_xor_mask(1<<LED_PIN);
+  //   last_blink = cur_time;
+  //   if(frame_column_step==0 && FRAME_COLUMN_WIDTH>0) FRAME_COLUMN_WIDTH--;
+  // }else{
+  //   if(frame_column_step==0 && FRAME_COLUMN_WIDTH<256) FRAME_COLUMN_WIDTH++;
+  // }
+}
+
+#if 1
+static BYTE old_frame_skip_counter;
 void __not_in_flash_func(core1_main)()
 {
+    /*
+    *
+    * AUDIO (parallel process)
+    *
+    */
+
+    #ifdef ILI9341
+     audio_init(7,19654);
+    #endif
+    #ifdef ST7789
+     audio_init(7,20000);
+    #endif
 #if 0
     while (true)
     {
@@ -773,7 +817,7 @@ void __not_in_flash_func(core1_main)()
         /*
          *   (1/22050) * 735 = 33333us
          */
-        sleep_us(12850);
+        // sleep_us(33333);
 
 
         /*
@@ -784,9 +828,21 @@ void __not_in_flash_func(core1_main)()
 
             // int id = audio_play_once(snd_buf,735*2);
 
+        
+        if(frame_skip_counter != old_frame_skip_counter){
+            old_frame_skip_counter = frame_skip_counter;
+            if(frame_skip_counter == 0){
+        
+                // waiting for SoundOutput
+                while(SoundOutputBuilding == true);
 
-
-
+                blink_led();
+                int id = audio_play_once(snd_buf,AUDIO_BUF_SIZE-buf_residue_size);
+                // if (id >= 0) audio_source_set_volume(id, 1024);
+                buf_residue_size = AUDIO_BUF_SIZE;
+                audio_mixer_step();
+            }
+        }
 
 
 
@@ -807,27 +863,7 @@ void __not_in_flash_func(core1_main)()
 #endif
 
 
-static void __not_in_flash_func(blink_led)(void)
-{
-  static uint64_t last_blink = 0;
 
-// frame timing control
-  uint64_t cur_time = time_us_64();
-  uint64_t diff_time = cur_time - last_blink;
-  // 1/60 = 16666 us
-  while (last_blink + (16667) > cur_time) {cur_time = time_us_64();}
-    gpio_xor_mask(1<<LED_PIN);
-    last_blink = cur_time;
-      
-  // uint64_t cur_time = time_us_64();
-  // if (last_blink + 16666 < cur_time) {
-  //   gpio_xor_mask(1<<LED_PIN);
-  //   last_blink = cur_time;
-  //   if(frame_column_step==0 && FRAME_COLUMN_WIDTH>0) FRAME_COLUMN_WIDTH--;
-  // }else{
-  //   if(frame_column_step==0 && FRAME_COLUMN_WIDTH<256) FRAME_COLUMN_WIDTH++;
-  // }
-}
 
 uint32_t FrameCounter=0;
 uint16_t test_color_bar = 0;
@@ -846,7 +882,7 @@ int __not_in_flash_func(InfoNES_LoadFrame)()
 /*
  *. blink the led and control speed
  */
-    blink_led();
+    speed_control();
 
 /*
  *
@@ -861,9 +897,15 @@ int __not_in_flash_func(InfoNES_LoadFrame)()
         /*
          *   sound process : 735 samples per frame
          */  
-
     }
     // (AUDIO_BUF_SIZE-buf_residue_size)
+
+    /*
+    *
+    *. AUDIO (not parallel process)
+    *
+    */
+    #if 0
     if(frame_skip_counter == 0){
         int j=0;
         // for(int i=0; i<(AUDIO_BUF_SIZE-buf_residue_size); i+=1,j++){
@@ -877,8 +919,8 @@ int __not_in_flash_func(InfoNES_LoadFrame)()
     }
 
         audio_mixer_step();
-    
-
+    #endif
+        
 /*
  *
  */
@@ -1066,7 +1108,7 @@ void __not_in_flash_func(InfoNES_PostDrawLine)(int line)
 // if(frame_skip) return;
 
 
-        screen_y = line;
+        // screen_y = line;
 
     // if(line_drawing==false){
 
@@ -1481,13 +1523,20 @@ int main()
     // 
     // 735 samples per frame
     //
+    /*
+    *
+    * AUDIO (not parallel process)
+    *
+    */
+    #if 0
     #ifdef ILI9341
-    audio_init(7,19654);
+     audio_init(7,19654);
     #endif
     #ifdef ST7789
-    audio_init(7,20050);
-    // audio_init(7,22050);
-    // audio_init(7,44100);
+     audio_init(7,20050);
+     // audio_init(7,22050);
+     // audio_init(7,44100);
+    #endif
     #endif
 
     //tusb_init();
@@ -1551,7 +1600,7 @@ int main()
     // 空サンプル詰めとく
     dvi_->getAudioRingBuffer().advanceWritePointer(255);
 #endif
-    // multicore_launch_core1(core1_main);
+    multicore_launch_core1(core1_main);
 
     // InfoNES_Main();
 
