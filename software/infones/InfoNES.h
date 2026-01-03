@@ -23,7 +23,7 @@
 #define SRAM_SIZE 0x2000
 #define PPURAM_SIZE 0x4000
 #define SPRRAM_SIZE 256
-#define CHRBUF_SIZE 256 * 2 * 8 * 8
+#define CHRBUF_SIZE 256 * 2 * 8 * 8 
 
 /* RAM */
 extern BYTE RAM[];

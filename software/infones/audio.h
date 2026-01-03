@@ -1,6 +1,7 @@
 #ifndef AUDIO_H_FILE
 #define AUDIO_H_FILE
 
+// #define AUDIO_BUFFER_SIZE 1024
 #define AUDIO_BUFFER_SIZE 1024
 #define AUDIO_MAX_SOURCES 2
 
@@ -20,6 +21,7 @@ void audio_source_stop(int source_id);
 void audio_source_set_volume(int source_id, uint16_t volume);
 
 void audio_mixer_step(void);
+bool audio_is_source_active(int source_id);
 
 #ifdef __cplusplus
 }

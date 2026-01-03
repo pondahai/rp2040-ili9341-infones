@@ -4,6 +4,7 @@
 #include "FrensHelpers.h"
 #include <pico.h>
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
 #include "hardware/flash.h"
 #include <hardware/sync.h>
 
@@ -178,6 +179,13 @@ void RomSelect_DrawLine(int line, int selectedRow)
 
         int rowInChar = line % FONT_CHAR_HEIGHT;
         char fontSlice = font_8x8[(c - FONT_FIRST_ASCII) + (rowInChar)*FONT_N_CHARS];
+        // dahai
+        // static char even_row;
+          // if(rowInChar%2 == 0) even_row = fontSlice;
+        // if(rowInChar > 0 ){
+          // if(rowInChar%2 == 1) fontSlice = even_row;
+        // }
+        //
         for (auto bit = 0; bit < 8; bit++)
         {
             if (fontSlice & 1)
@@ -307,16 +315,15 @@ void showSplashScreen()
     char s[SCREEN_COLS];
     ClearScreen(screenBuffer, bgcolor);
 
-    strcpy(s, "Pico-Info");
+    strcpy(s, "maGc - infones");
     putText(SCREEN_COLS / 2 - (strlen(s) + 4) / 2, 2, s, fgcolor, bgcolor);
 
-    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 7, 2, "N", CRED, bgcolor);
-    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 8, 2, "E", CGREEN, bgcolor);
-    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 9, 2, "S", CBLUE, bgcolor);
-    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 10, 2, "+", fgcolor, bgcolor);
-    strcpy(s, "Emulator");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 5, s, fgcolor, bgcolor);
-     strcpy(s, "@jay_kumogata");
+    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 9, 2, "N", CRED, bgcolor);
+    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 10, 2, "E", CGREEN, bgcolor);
+    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 11, 2, "S", CBLUE, bgcolor);
+    // strcpy(s, "Emulator");
+    //putText(SCREEN_COLS / 2 - strlen(s) / 2, 5, s, fgcolor, bgcolor);
+     strcpy(s, "@pondahai");
     putText(SCREEN_COLS / 2 - strlen(s) / 2, 6, s, CLIGHTBLUE, bgcolor);
 
     strcpy(s, "Pico Port");
@@ -329,21 +336,21 @@ void showSplashScreen()
     strcpy(s, "@frenskefrens");
     putText(SCREEN_COLS / 2 - strlen(s) / 2, 14, s, CLIGHTBLUE, bgcolor);
 
-    strcpy(s, "(S)NES controller support");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 17, s, fgcolor, bgcolor);
+    // strcpy(s, "(S)NES controller support");
+    //putText(SCREEN_COLS / 2 - strlen(s) / 2, 17, s, fgcolor, bgcolor);
 
-    strcpy(s, "@PaintYourDragon @adafruit");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 18, s, CLIGHTBLUE, bgcolor);
+    // strcpy(s, "@PaintYourDragon @adafruit");
+    //putText(SCREEN_COLS / 2 - strlen(s) / 2, 18, s, CLIGHTBLUE, bgcolor);
 
     strcpy(s, "PCB Design");
     putText(SCREEN_COLS / 2 - strlen(s) / 2, 21, s, fgcolor, bgcolor);
 
-    strcpy(s, "@johnedgarpark");
+    strcpy(s, "@pondahai");
     putText(SCREEN_COLS / 2 - strlen(s) / 2, 22, s, CLIGHTBLUE, bgcolor);
 
-    strcpy(s, "https://github.com/");
+    strcpy(s, "https://github.com/pondahai");
     putText(SCREEN_COLS / 2 - strlen(s) / 2, 25, s, CLIGHTBLUE, bgcolor);
-    strcpy(s, "fhoedemakers/pico-infonesPlus");
+    strcpy(s, "/rp2040-ili9341-infones");
     putText(1, 26, s, CLIGHTBLUE, bgcolor);
     int startFrame = -1;
     while (true)
@@ -571,6 +578,7 @@ void menu(uintptr_t NES_FILE_ADDR, char *errorMessage, bool isFatal)
                 {
                     // https://kevinboone.me/picoflash.html?i=1
                     // https://www.makermatrix.com/blog/read-and-write-data-with-the-pi-pico-onboard-flash/
+                    multicore_reset_core1(); // Stop Core 1 (Audio) safely before erasing/writing flash
                     printf("Start saving rom to flash memory\n");
                     // exclProc_.setProcAndWait(
                     //     []

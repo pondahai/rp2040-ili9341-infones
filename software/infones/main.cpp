@@ -128,6 +128,86 @@ BYTE snd_buf[AUDIO_BUF_SIZE]={0};
 int buf_residue_size=AUDIO_BUF_SIZE;
 static int display_dma_channel;
 
+#include "hardware/sync.h"
+
+#define AUDIO_RING_BUFFER_SIZE 8192 // Increased buffer size
+
+struct AudioRingBuffer {
+    uint8_t buffer[AUDIO_RING_BUFFER_SIZE];
+    volatile int head = 0;
+    volatile int tail = 0;
+    spin_lock_t *lock;
+    bool initialized = false;
+
+    void init() {
+        if (!initialized) {
+            lock = spin_lock_init(spin_lock_claim_unused(true));
+            head = 0;
+            tail = 0;
+            initialized = true;
+        }
+    }
+
+    int check_initialized() {
+        if (!initialized) init();
+        return 0;
+    }
+
+    int writable_size() {
+        check_initialized();
+        int h = head;
+        int t = tail;
+        // Simple calculation: size - 1 - occupied
+        int occupied;
+        if (h >= t) occupied = h - t;
+        else occupied = AUDIO_RING_BUFFER_SIZE - (t - h);
+        
+        return AUDIO_RING_BUFFER_SIZE - 1 - occupied;
+    }
+
+    int readable_size() {
+        check_initialized();
+        int h = head;
+        int t = tail;
+        if (h >= t) return h - t;
+        return AUDIO_RING_BUFFER_SIZE - (t - h);
+    }
+
+    void write(const uint8_t* data, int len) {
+        check_initialized();
+        uint32_t saved_irq = spin_lock_blocking(lock);
+        for(int i=0; i<len; ++i) {
+             buffer[head] = data[i];
+             head = (head + 1) % AUDIO_RING_BUFFER_SIZE;
+        }
+        spin_unlock(lock, saved_irq);
+    }
+
+    int read(uint8_t* dest, int max_len) {
+        check_initialized();
+        uint32_t saved_irq = spin_lock_blocking(lock);
+        
+        // precise readable check inside lock
+        int h = head;
+        int t = tail;
+        int count;
+        if (h >= t) count = h - t;
+        else count = AUDIO_RING_BUFFER_SIZE - (t - h);
+
+        int to_read = (max_len < count) ? max_len : count;
+        
+        for(int i=0; i<to_read; ++i) {
+            dest[i] = buffer[tail];
+            tail = (tail + 1) % AUDIO_RING_BUFFER_SIZE;
+        }
+        spin_unlock(lock, saved_irq);
+        return to_read;
+    }
+};
+
+AudioRingBuffer audioRing;
+
+
 // #ifndef DVICONFIG
 // //#define DVICONFIG dviConfig_PicoDVI
 // #define DVICONFIG dviConfig_PicoDVISock
@@ -535,12 +615,10 @@ void InfoNES_SoundClose()
 
 int __not_in_flash_func(InfoNES_GetSoundBufferSize)()
 {
-   // return dvi_->getAudioRingBuffer().getFullWritableSize();
-   
-   // return 735*2;
-   return buf_residue_size;
-    // return 128;
+   return audioRing.writable_size();
 }
+
+#define TARGET_LATENCY_BYTES 1500 // Approx 2 frames of audio at 22050Hz
 
 /*
  *  call from InfoNES_pAPUHsync
@@ -550,20 +628,24 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
     static int test_i=0;
 
     SoundOutputBuilding = true;
-    while (samples)
+    
+    // Use snd_buf as a scratchpad buffer
+    // Ensure we don't overflow snd_buf if samples is unexpectedly large (though usually ~735)
+    int remaining = samples;
+    while (remaining > 0)
     {
-        // auto &ring = dvi_->getAudioRingBuffer();
-        // auto n = std::min<int>(samples, ring.getWritableSize());
-        auto n = std::min<int>(samples, buf_residue_size);
-        // auto n = samples;
-        if (!n)
+        // Latency Control / Synchronization
+        // If the buffer is too full, wait for Core 1 to consume some samples.
+        // This throttles Core 0 to match the audio playback speed.
+        while (audioRing.readable_size() > TARGET_LATENCY_BYTES)
         {
-            return;
+            sleep_us(100); 
         }
-        // auto p = ring.getWritePointer();
-        auto p = &snd_buf[AUDIO_BUF_SIZE-buf_residue_size];
-        // auto p = snd_buf;
 
+        int n = remaining;
+        if (n > AUDIO_BUF_SIZE) n = AUDIO_BUF_SIZE;
+
+        auto p = snd_buf;
         int ct = n;
         while (ct--)
         {
@@ -572,44 +654,26 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
             uint8_t w3 = *wave3++; // triangle
             uint8_t w4 = *wave4++; // noise
             uint8_t w5 = *wave5++; // DPCM
-            //            w3 = w2 = w4 = w5 = 0;
-             // int l = w1 * 6 + w2 * 3 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
-             // int r = w1 * 3 + w2 * 6 + w3 * 5 + w4 * 3 * 17 + w5 * 2 * 32;
-             // *p++ = {static_cast<short>(l), static_cast<short>(r)};
 
-             *p++ =  (((w1 * 2 + w2 * 2)/2)  + w3 * 1  + w4 * 1 * 4 + w5 * 2 * 1) / 4;
-
-            //*p++ =  (w1 * 4 + w2 * 6  + w3 * .1  + w4 * .1 + w5 * 3 ) * 1;
-            //*p++ =  (w1 * .1 + w2 * .1  + w3 * .1  + w4 * .1 + w5 * .1 ) * 1;
-
-
-            //*p++ =  ((w1>w2)?w1*6:w1*3 + (w1<w2)?w2*6:w2*3 + w3 * 5  + w4 * 3 * 17 + w5 * 2 * 32) / 8;
-
-            // *p++ = snd_drum[test_i++];
-            // if(test_i > sizeof(snd_drum)) test_i = 0;
-
-
-            // pulse_out = 0.00752 * (pulse1 + pulse2)
-            // tnd_out = 0.00851 * triangle + 0.00494 * noise + 0.00335 * dmc
-
-            // 0.00851/0.00752 = 1.131648936170213
-            // 0.00494/0.00752 = 0.6569148936170213
-            // 0.00335/0.00752 = 0.4454787234042554
-
-            // 0.00752/0.00851 = 0.8836662749706228
-            // 0.00494/0.00851 = 0.5804935370152762
-            // 0.00335/0.00851 = 0.3936545240893067
+#ifdef ILI9341
+             *p++ =  (((w1 * 2 + w2 * 2)/2)  + w3 * 1  + w4 * 1 * 4 + w5 * 2 * 4) / 4;
+#endif
+#ifdef ST7789
+             *p++ =  (((w1 * 2 + w2 * 2)/2)  + w3 * 1  + w4 * 1 * 4 + w5 * 2 * 4) * 16;
+#endif
         }
 
-        // ring.advanceWritePointer(n);
-        samples -= n;
-        buf_residue_size -= n;
-        // snd_buf should not be full, just for case
-        if(buf_residue_size <= 0) buf_residue_size = AUDIO_BUF_SIZE;
+        // Write to RingBuffer, wait if full or just spin? 
+        // For now, valid write only what fits or overwrite?
+        // simple write
+        audioRing.write(snd_buf, n);
         
+        remaining -= n;
     }
+
     SoundOutputBuilding = false;
 }
+
 
 
 extern WORD PC;
@@ -779,87 +843,55 @@ void __not_in_flash_func(core1_main)()
     #ifdef ST7789
      audio_init(7,20000);
     #endif
-#if 0
+
+    // Buffer interaction variables
+    uint8_t play_buffers[2][1024]; 
+    int buf_sel = 0;
+
+    // Pre-fill ring buffer a bit? 
+    // Not strictly necessary as loop handles empty case.
+    
     while (true)
     {
-        dvi_->registerIRQThisCore();
-        dvi_->waitForValidLine();
-
-        dvi_->start();
-        while (!exclProc_.isExist())
-        {
-            if (scaleMode8_7_)
-            {
-                dvi_->convertScanBuffer12bppScaled16_7(34, 32, 288 * 2);
-                // 34 + 252 + 34
-                // 32 + 576 + 32
-            }
-            else
-            {
-                dvi_->convertScanBuffer12bpp();
-            }
-        }
-
-        dvi_->unregisterIRQThisCore();
-        dvi_->stop();
-
-        exclProc_.processOrWaitIfExist();
-    }
-#endif
-
-    while(true){
-    //     if(line_drawing){
-
-    //     for(int x=0;x<256;x++){
-    //         hagl_put_pixel(display,screen_y,x+((320-256)/2),scanline_buf_outgoing[x]);
-    //     }
-
-        /*
-         *   (1/22050) * 735 = 33333us
-         */
-        // sleep_us(33333);
-
-
-        /*
-         *   sound process
-         */
-            
-            
-
-            // int id = audio_play_once(snd_buf,735*2);
-
+        // Check availability
+        int available = audioRing.readable_size();
         
-        if(frame_skip_counter != old_frame_skip_counter){
-            old_frame_skip_counter = frame_skip_counter;
-            if(frame_skip_counter == 0){
+        // We want reasonable chunks, but if buffer is getting full, read more?
+        // Max chunk that fits in our temp buffer is 1024.
+        int chunk = (available > 1024) ? 1024 : available;
         
-                // waiting for SoundOutput
-                while(SoundOutputBuilding == true);
-
-                blink_led();
-                int id = audio_play_once(snd_buf,AUDIO_BUF_SIZE-buf_residue_size);
-                // if (id >= 0) audio_source_set_volume(id, 1024);
-                buf_residue_size = AUDIO_BUF_SIZE;
+        // Don't play tiny chunks unless we have to (latency vs overhead)
+        // But if we wait too long, silence happens. 
+        // audio_mixer_step() keeps running silence if no source active.
+        
+        if (chunk > 0) {
+            int read_len = audioRing.read(play_buffers[buf_sel], chunk);
+            
+            // Queue for playback
+            int id = audio_play_once(play_buffers[buf_sel], read_len);
+            
+            // Toggle buffer for next time
+            buf_sel = 1 - buf_sel;
+            
+            // Pump mixer until this source finishes
+            // This ensures meaningful sequential playback without complex source queueing logic
+            if (id >= 0) {
+                while(audio_is_source_active(id)) {
+                    audio_mixer_step();
+                    // optional: sleep_us(10)? 
+                    // No, tightly loop to not miss DMA window
+                }
+            } else {
+                // Failed to play (no source?), just pump mixer
                 audio_mixer_step();
             }
+        } else {
+             // starve case
+             audio_mixer_step();
         }
-
-
-
-
-    //     line_drawing = false;
-    // }
-        // for(int y=0;y<240;y++)
-        //     for(int x=0;x<256;x++){
-        //         hagl_put_pixel(display,y,x+((320-256)/2),framebuffer[x+(256*y)]);
-        //     }
-        // if(audio_step_counter++>153){
-            // audio_step_counter=0;
-            // audio_mixer_step();
-        // }
-        // sleep_us(130);
-    } // while
+    }
 }
+
 #endif
 
 

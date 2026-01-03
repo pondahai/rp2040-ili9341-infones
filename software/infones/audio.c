@@ -113,7 +113,7 @@ void audio_init(int audio_pin, int sample_freq)
   dma_channel_start(trigger_dma_chan);
 }
 
-uint8_t *audio_get_buffer(void)
+uint8_t * __not_in_flash_func(audio_get_buffer)(void)
 {
   if (last_audio_buffer == cur_audio_buffer) {
     return NULL;
@@ -124,7 +124,7 @@ uint8_t *audio_get_buffer(void)
   return buf;
 }
 
-static int audio_claim_unused_source(void)
+static int __not_in_flash_func(audio_claim_unused_source)(void)
 {
   for (int i = 0; i < AUDIO_MAX_SOURCES; i++) {
     if (! mixer_sources[i].active) {
@@ -216,4 +216,10 @@ void __not_in_flash_func(audio_mixer_step)(void)
       audio_buffer[i] = sample;
     }
   }
+}
+
+bool __not_in_flash_func(audio_is_source_active)(int source_id)
+{
+    if (source_id < 0 || source_id >= AUDIO_MAX_SOURCES) return false;
+    return mixer_sources[source_id].active;
 }
