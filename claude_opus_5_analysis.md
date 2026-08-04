@@ -126,11 +126,47 @@ PPU 繪製與音訊混音——這在 RP2040 上完全不夠。
 > 而 `InfoNES.cpp:457` 又把 `FrameSkip = 0`。
 > 現況是**每一幀都完整送屏**，README 描述的功能在程式碼中不存在。
 
+### 3.1 跳幀機制的演變考證
+
+跳幀不是從來沒有過，而是**在達成足夠吞吐量之後被刻意移除**的。git 歷史如下：
+
+| 日期 | commit | 事件 |
+|---|---|---|
+| 2023-04-10 | `dd60662` software add folder | **跳幀誕生**：`BYTE frame_skip;` 加上 `InfoNES_PostDrawLine()` 開頭的 `if(frame_skip) return;`，三幀畫一幀 |
+| 2023-04-12 | `565a03e` | 音訊搭上同一節拍：`if(frame_skip_counter == 0){ ... }` 每三幀送一次音訊 |
+| **2023-04-18** | **`43a143f` speed up to 53 FPS** | **顯示端跳幀被註解掉** |
+| 2024-01-12 | `9dd8b3a` | 收尾：`BYTE frame_skip;`、`frame_skip = true/false;` 一併註解，變數正式報廢 |
+| 2024-01-15 | `a7b9069` | core1 仍以 `frame_skip_counter` 當音訊節拍（配合 `SoundOutputBuilding` 旗標） |
+| 2026-01-03 | `c2f2c2f` | 改用 ring buffer + `TARGET_LATENCY_BYTES` 節流，**最後一個使用者被移除**，只剩空轉的計數器 |
+
+關鍵是 `43a143f`，它把逐線 DMA 從同步改成非同步：
+
+```diff
+                 dma_channel_wait_for_finish_blocking(display_dma_channel);
++        memcpy(scanline_buf_outgoing, scanline_buf_internal, sizeof(scanline_buf_outgoing));
+                 dma_channel_set_trans_count(display_dma_channel, 256*2, false);
+-                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_internal, true);
+-                dma_channel_wait_for_finish_blocking(display_dma_channel);
++                dma_channel_set_read_addr(display_dma_channel, (uint8_t *)scanline_buf_outgoing, true);
++                // dma_channel_wait_for_finish_blocking(display_dma_channel);
+```
+
+原本是「設定 DMA → 等它跑完 → 才回去模擬下一線」，DMA 完全沒有省到 CPU 時間。
+改成寫入 outgoing 緩衝區後**不等待**，SPI 傳輸才真正與下一條掃描線的 PPU 運算重疊。
+同一個 commit 裡 `if(frame_skip) return;` 被註解掉——吞吐量夠了，就不必再靠丟幀換速度。
+commit message 的「53 FPS」正是移除跳幀後的實測值。
+
+（目前的奇偶線雙緩衝 `scanline_buf_internal_1/_2` 是更後期的改良，連這裡的 `memcpy`
+都省掉了。）
+
+> **結論**：計數器邏輯是歷史殘留，不是壞掉的功能。若要重新啟用跳幀（見第 6 節），
+> 應該視為新增功能來設計，而不是「修復」既有程式碼。
+
 ---
 
 ## 4. 問題清單
 
-### 4.1 音訊取樣率與 APU 產生率不匹配 ⚠️ 高
+### 4.1 音訊取樣率被當成速度節流器 ⚠️ 中（原判定為「不匹配」，經 git 考證確認為刻意設計）
 
 - pAPU 設定 `#define pAPU_QUALITY 2`（`InfoNES_pAPU.h:171`）
   → `ApuQuality = 1`（`InfoNES_pAPU.cpp:1208`）
@@ -148,8 +184,28 @@ while (audioRing.readable_size() > TARGET_LATENCY_BYTES)  // main.cpp:639
 
 於是**整個模擬速度被音訊消耗端反向拖住約 12%**（約 53 fps、音高偏低約兩個半音）。
 
-若這是刻意用來把模擬速度壓到顯示能力範圍內的節流手段，應該加註解說明；
-若不是，`19654` 應改為 `22050`。
+**git 歷史證實這是刻意的。** `audio_init()` 的取樣率一直被當成速度旋鈕在調校：
+
+| 日期 | commit | 取樣率 | 同期事件 |
+|---|---|---|---|
+| 2023-04-10 | `dd60662` | 22050 | 初版，與 APU 產生率一致 |
+| 2023-04-12 | `565a03e` | 17159 | 音訊改為每三幀送一次 |
+| 2023-04-18 | `43a143f` | 19477 | **同一 commit 移除跳幀，畫面變快，取樣率跟著上調** |
+| 2023-04-19 | `76c092f` | **19654** | 細調定案，之後兩年多未再變動 |
+
+（ST7789 分支另有 20050 → 20000 的平行調校軌跡，見 `a7b9069`。）
+
+每次顯示效能改變，這個數字就跟著微調，方向完全一致：畫面變快 → 取樣率上調 →
+節流放鬆。19654 是 2023-04-19 手工調出來的定值，不是筆誤。
+
+因此**不應**直接把它改成 22050——那會解除節流，讓模擬跑到超過顯示能力的速度。
+正確的處理是：
+
+1. 在 `audio_init(7, 19654)` 處加註解，說明這是速度節流器而非單純的取樣率；
+2. 若要正音（消除 12% 的音高偏低），必須先建立獨立的幀率節流機制
+   （或修好 `speed_control()`，見 4.5），再把取樣率還原成 22050。
+
+在那之前，這個「不匹配」是系統正常運作的一部分。
 
 ### 4.2 Ring buffer 寫入端無溢位保護，且會永久阻塞 ⚠️ 高
 
@@ -259,15 +315,17 @@ endif()
 
 ## 6. 建議的修復優先順序
 
-1. **修 4.1（取樣率不匹配）與 4.2（無限等待 + 無溢位保護）**
-   這兩項直接影響可玩性與穩定性，且改動範圍小。
-2. **重新接上跳幀機制**
-   README 承諾的功能目前在程式碼中不存在；以現有頻寬計算，
-   不跳幀不可能達到 60 fps。
-3. **加上 SPI 同步防護（4.4）**
+1. **修 4.2（無限等待 + 無溢位保護）**
+   唯一會造成整機凍結的問題，且改動範圍小。優先度最高。
+2. **加上 SPI 同步防護（4.4）**
    在所有 `display_write_command()` 之前先等 DMA 與 SPI FIFO 都空。
-4. **統一節流機制（4.5）**
-   保留音訊節流或幀率節流其中一套，移除另一套。
+3. **統一節流機制（4.5 + 4.1）**
+   目前音訊節流（實際生效）與 `speed_control()`（幾乎無效）並存。
+   建議把速度控制收斂成單一機制，之後才有可能把取樣率還原成 22050 正音。
+4. **決定跳幀的去留（3.1）**
+   計數器是歷史殘留而非壞掉的功能——`43a143f` 之後靠非同步 DMA 就達到 53 fps。
+   若要進一步提速再考慮重新設計，否則應直接刪除殘留變數。
+   同時建議更新 README，目前的描述與程式碼現況不符。
 5. **程式碼清理與建置設定（4.6、4.7）**
 
 ---
