@@ -11,20 +11,33 @@ inline bool checkNESMagic(const uint8_t *data)
     return memcmp(data, "NES\x1a", 4) == 0;
 }
 
-// fwNES header: "FDS\x1a", side count, then 11 reserved bytes,
-// followed by <side count> sides of 65500 bytes each.
-inline bool checkFDSMagic(const uint8_t *data)
+// Every side starts with a disk info block: 0x01 followed by this literal.
+// It is what identifies a headerless image, and how the sides are counted.
+inline bool checkFDSDiskInfoBlock(const uint8_t *data)
+{
+    return data[0] == 0x01 && memcmp(data + 1, "*NINTENDO-HVC*", 14) == 0;
+}
+
+// Two layouts in the wild: the fwNES header ("FDS\x1a", side count, then
+// 11 reserved bytes) followed by the sides, or the raw sides on their own.
+inline bool checkFDSHeader(const uint8_t *data)
 {
     return memcmp(data, "FDS\x1a", 4) == 0;
+}
+
+inline bool checkFDSMagic(const uint8_t *data)
+{
+    return checkFDSHeader(data) || checkFDSDiskInfoBlock(data);
 }
 
 inline bool hasNVRAM(const uint8_t *data)
 {
     if (checkFDSMagic(data))
     {
-        // Disk writes are Phase 5; until then an FDS image gets no
-        // NVRAM slot, so nothing is loaded into SRAM at startup.
-        return false;
+        // An FDS image always gets a slot: it stores the disk write
+        // journal there rather than SRAM. Sized to match, so the slot
+        // layout is unchanged.
+        return true;
     }
     auto info1 = data[6];
     return info1 & 2;
@@ -52,7 +65,8 @@ public:
         {
             // An .fds image is always burned on its own, never in a TAR.
             singleROM_ = p;
-            printf("Single FDS disk image, %d side(s).\n", p[4]);
+            printf("Single FDS disk image (%s header).\n",
+                   checkFDSHeader(p) ? "fwNES" : "no");
             return;
         }
 

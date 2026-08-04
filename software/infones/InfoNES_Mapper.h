@@ -153,10 +153,26 @@ void Map20_RenderScreen(BYTE byMode);
 
 /* Famicom Disk System loader interface (see mapper/InfoNES_Mapper_020.cpp) */
 #define FDS_BIOS_SIZE 0x2000
+#define FDS_SIDE_SIZE 65500 /* one side of a .fds image, header excluded */
+#define FDS_SAVE_SIZE 0x2000 /* write journal; matches one NVRAM slot */
 BYTE *FDS_GetBiosBuffer(void);
 void FDS_SetBiosPresent(bool bPresent);
 bool FDS_IsBiosPresent(void);
 void FDS_SetDiskImage(const BYTE *pImage, int nSides);
+bool FDS_IsDiskLoaded(void);
+
+/* Side switching (Phase 5) */
+void FDS_SetSide(int nSide);
+void FDS_NextSide(void);
+void FDS_PrevSide(void);
+int FDS_GetSide(void);
+int FDS_GetSideCount(void);
+
+/* Disk write journal, saved to a flash NVRAM slot (Phase 5) */
+BYTE *FDS_GetSaveBuffer(void);
+bool FDS_IsSaveDirty(void);
+void FDS_SerializeSave(void);
+void FDS_DeserializeSave(void);
 
 void Map21_Init();
 void Map21_Write(WORD wAddr, BYTE byData);

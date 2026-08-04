@@ -337,23 +337,46 @@ uint32_t getCurrentNVRAMAddr()
 
 void saveNVRAM()
 {
-    if (!SRAMwritten)
+    // An FDS image stores its disk write journal in the slot instead of
+    // SRAM: for the FDS, $6000-$7FFF is BIOS scratch RAM and is not
+    // battery backed, so saving it would be meaningless.
+    bool isFDS = FDS_IsDiskLoaded();
+    const uint8_t *src;
+
+    if (isFDS)
     {
-        printf("SRAM not updated.\n");
-        return;
+        if (!FDS_IsSaveDirty())
+        {
+            printf("FDS disk not written.\n");
+            return;
+        }
+        FDS_SerializeSave();
+        src = FDS_GetSaveBuffer();
+        printf("save FDS disk journal\n");
+    }
+    else
+    {
+        if (!SRAMwritten)
+        {
+            printf("SRAM not updated.\n");
+            return;
+        }
+        src = SRAM;
+        printf("save SRAM\n");
     }
 
-    printf("save SRAM\n");
     // exclProc_.setProcAndWait([]
     //                          {
         static_assert((SRAM_SIZE & (FLASH_SECTOR_SIZE - 1)) == 0);
+        static_assert(FDS_SAVE_SIZE == SRAM_SIZE,
+                      "the FDS journal has to fit one NVRAM slot exactly");
         if (auto addr = getCurrentNVRAMAddr())
         {
             auto ofs = addr - XIP_BASE;
             printf("write flash %x\n", ofs);
             {
                 flash_range_erase(ofs, SRAM_SIZE);
-                flash_range_program(ofs, SRAM, SRAM_SIZE);
+                flash_range_program(ofs, src, SRAM_SIZE);
             }
          } //});
     printf("done\n");
@@ -365,8 +388,19 @@ void loadNVRAM()
 {
     if (auto addr = getCurrentNVRAMAddr())
     {
-        printf("load SRAM %x\n", addr);
-        memcpy(SRAM, reinterpret_cast<void *>(addr), SRAM_SIZE);
+        if (FDS_IsDiskLoaded())
+        {
+            printf("load FDS disk journal %x\n", addr);
+            memcpy(FDS_GetSaveBuffer(), reinterpret_cast<void *>(addr), FDS_SAVE_SIZE);
+            // Validates the magic and rebuilds the index; an erased slot
+            // reads as 0xFF and simply starts empty.
+            FDS_DeserializeSave();
+        }
+        else
+        {
+            printf("load SRAM %x\n", addr);
+            memcpy(SRAM, reinterpret_cast<void *>(addr), SRAM_SIZE);
+        }
     }
     SRAMwritten = false;
 }
@@ -506,12 +540,24 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
         {
             if (pushed & _LEFT)
             {
+                // Switch disk side. The old ROM-switching binding these
+                // combos used to have is commented out below.
+                if (FDS_IsDiskLoaded())
+                {
+                    FDS_PrevSide();
+                    printf("FDS disk side %d/%d\n", FDS_GetSide() + 1, FDS_GetSideCount());
+                }
                 // saveNVRAM();
                 // romSelector_.prev();
                 // reset = true;
             }
             if (pushed & _RIGHT)
             {
+                if (FDS_IsDiskLoaded())
+                {
+                    FDS_NextSide();
+                    printf("FDS disk side %d/%d\n", FDS_GetSide() + 1, FDS_GetSideCount());
+                }
                 // saveNVRAM();
                 // romSelector_.next();
                 // reset = true;
@@ -564,12 +610,44 @@ void InfoNES_MessageBox(const char *pszMsg, ...)
 
 // Build a synthetic iNES header for an .fds image so that the existing
 // InfoNES_Reset() path (mapper lookup, SetupPPU, ...) can run unchanged.
+#define FDS_MAX_SIDES 8
+
 static bool parseFDS(const uint8_t *fdsFile)
 {
-    int sides = fdsFile[4];
+    const uint8_t *sideData;
+    int sides;
+
+    if (checkFDSHeader(fdsFile))
+    {
+        sideData = fdsFile + 16;
+        sides = fdsFile[4];
+    }
+    else
+    {
+        // Headerless image: the sides are simply concatenated, so count
+        // them by looking for a disk info block at each side boundary.
+        sideData = fdsFile;
+        sides = 0;
+    }
+
+    // Trust the boundaries rather than the header's side count: a wrong
+    // count here would have the mapper read past the end of the image.
+    {
+        int n = 0;
+        while (n < FDS_MAX_SIDES &&
+               checkFDSDiskInfoBlock(sideData + (size_t)n * FDS_SIDE_SIZE))
+        {
+            n++;
+        }
+        if (sides < 1 || sides > n)
+        {
+            sides = n;
+        }
+    }
+
     if (sides < 1)
     {
-        printf("FDS image reports %d sides.\n", sides);
+        printf("No FDS disk info block found; not a usable image.\n");
         return false;
     }
 
@@ -595,8 +673,9 @@ static bool parseFDS(const uint8_t *fdsFile)
     ROM = nullptr;
     VROM = nullptr;
 
-    FDS_SetDiskImage(fdsFile + 16, sides);
-    printf("FDS disk image: %d side(s) at %p\n", sides, fdsFile + 16);
+    FDS_SetDiskImage(sideData, sides);
+    printf("FDS disk image: %d side(s) at %p (%s header)\n", sides, sideData,
+           checkFDSHeader(fdsFile) ? "fwNES" : "no");
     return true;
 }
 
