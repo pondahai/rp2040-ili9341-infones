@@ -191,6 +191,13 @@ static WORD FDS_DbgFireLine[8];
 static int FDS_DbgFireIdx = 0;
 /* And where the game re-arms it, which is what the fire line is relative to */
 static WORD FDS_DbgArmLine = 0;
+/* Sampled at SCAN_VBLANK_END, before InfoNES_HSync() reloads PPU_Addr:
+   was rendering enabled (so does the reload happen at all), and what the
+   vertical scroll looks like in PPU_Temp vs the accumulated PPU_Addr. */
+static BYTE FDS_DbgRender[8];
+static WORD FDS_DbgAddrY[8];
+static WORD FDS_DbgTempY = 0;
+static int FDS_DbgFrameIdx = 0;
 #endif
 
 /*-------------------------------------------------------------------*/
@@ -898,16 +905,32 @@ void __not_in_flash_func(Map20_VSync)()
 void __not_in_flash_func(Map20_HSync)()
 {
 #if FDS_DEBUG_COUNTERS
+  if (PPU_Scanline == SCAN_VBLANK_END)
+  {
+    /* Runs before InfoNES_HSync(), so PPU_Addr is still what the frame
+       accumulated and has not been reloaded from PPU_Temp yet. */
+    int i = FDS_DbgFrameIdx & 7;
+    FDS_DbgRender[i] =
+        (BYTE)((PPU_R1 & (R1_SHOW_SP | R1_SHOW_SCR)) ? 1 : 0);
+    FDS_DbgAddrY[i] =
+        (WORD)((((PPU_Addr >> 5) & 31) * 8) + ((PPU_Addr >> 12) & 7));
+    FDS_DbgTempY =
+        (WORD)((((PPU_Temp >> 5) & 31) * 8) + ((PPU_Temp >> 12) & 7));
+    FDS_DbgFrameIdx++;
+  }
+
   if (++FDS_DbgTick >= FDS_DEBUG_PERIOD)
   {
     FDS_DbgTick = 0;
     InfoNES_MessageBox(
-        "FDS tIRQ/s=%d dIRQ/s=%d latch=%d en=%02x arm@%d fire=%d,%d,%d,%d,%d,%d,%d,%d",
-        FDS_DbgTimerIrq, FDS_DbgDiskIrq, (int)FDS_IrqLatch, FDS_IrqEnable,
-        FDS_DbgArmLine,
-        FDS_DbgFireLine[0], FDS_DbgFireLine[1], FDS_DbgFireLine[2],
-        FDS_DbgFireLine[3], FDS_DbgFireLine[4], FDS_DbgFireLine[5],
-        FDS_DbgFireLine[6], FDS_DbgFireLine[7]);
+        "FDS tIRQ/s=%d fire@%d R1=%02x render=%d%d%d%d%d%d%d%d "
+        "tempY=%d addrY=%d,%d,%d,%d,%d,%d,%d,%d",
+        FDS_DbgTimerIrq, FDS_DbgFireLine[0], PPU_R1,
+        FDS_DbgRender[0], FDS_DbgRender[1], FDS_DbgRender[2],
+        FDS_DbgRender[3], FDS_DbgRender[4], FDS_DbgRender[5],
+        FDS_DbgRender[6], FDS_DbgRender[7], FDS_DbgTempY,
+        FDS_DbgAddrY[0], FDS_DbgAddrY[1], FDS_DbgAddrY[2], FDS_DbgAddrY[3],
+        FDS_DbgAddrY[4], FDS_DbgAddrY[5], FDS_DbgAddrY[6], FDS_DbgAddrY[7]);
     FDS_DbgTimerIrq = 0;
     FDS_DbgDiskIrq = 0;
     FDS_DbgCtrlWrites = 0;
