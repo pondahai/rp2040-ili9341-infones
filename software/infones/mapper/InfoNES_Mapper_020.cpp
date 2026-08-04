@@ -19,7 +19,7 @@
 /*                                                                   */
 /*    DRAM[0x0000..0x5FFF]  -> $8000-$DFFF   PRG RAM   (24 KB)       */
 /*    DRAM[0x6000..0x7FFF]  -> $E000-$FFFF   BIOS      ( 8 KB)       */
-/*    DRAM[0x8000..0x9FFF]  -> unused                                */
+/*    DRAM[0x8000..0x9FFF]  -> disk write journal      ( 8 KB)       */
 /*                                                                   */
 /*  $6000-$7FFF uses the existing SRAM[] array, and CHR RAM uses     */
 /*  PPURAM[] like any cartridge without VROM.                        */
@@ -71,6 +71,37 @@ static_assert(FDS_BIOS_OFFSET + FDS_BIOS_SIZE <= DRAM_SIZE,
 #define FDS_DRIVE_PROTECTED 0x04
 
 /*-------------------------------------------------------------------*/
+/*  Disk write journal (Phase 5)                                     */
+/*                                                                   */
+/*  The disk image itself lives in flash and cannot be modified in    */
+/*  place, and a whole side (65500 bytes) will not fit in RAM. What   */
+/*  games actually write back is one or two small blocks, so the      */
+/*  writes are journalled instead: each write transfer becomes an     */
+/*  entry, and reads consult the journal before the flash image.      */
+/*                                                                   */
+/*  The journal is sized to exactly one existing NVRAM slot, so the   */
+/*  slot allocation in main.cpp needs no changes at all -- it just    */
+/*  stores this instead of SRAM for an FDS image.                     */
+/*                                                                   */
+/*    magic          4 bytes                                          */
+/*    entry count    4 bytes                                          */
+/*    entries        8 x 16 bytes                                     */
+/*    payload        the rest                                         */
+/*                                                                   */
+/*  Serialised byte by byte, so nothing depends on DRAM's alignment.  */
+/*-------------------------------------------------------------------*/
+
+#define FDS_SAVE_OFFSET 0x8000
+#define FDS_SAVE_MAGIC 0x30534446UL /* "FDS0" */
+#define FDS_SAVE_MAX_ENTRIES 8
+#define FDS_SAVE_ENTRY_BYTES 16
+#define FDS_SAVE_HEADER_BYTES (8 + FDS_SAVE_MAX_ENTRIES * FDS_SAVE_ENTRY_BYTES)
+#define FDS_SAVE_DATA_BYTES (FDS_SAVE_SIZE - FDS_SAVE_HEADER_BYTES)
+
+static_assert(FDS_SAVE_OFFSET + FDS_SAVE_SIZE <= DRAM_SIZE,
+              "the FDS write journal does not fit in DRAM");
+
+/*-------------------------------------------------------------------*/
 /*  State                                                            */
 /*-------------------------------------------------------------------*/
 
@@ -104,6 +135,28 @@ static bool FDS_XferIrqPending = false;
 static bool FDS_XferArmed = false; /* a byte is on its way */
 static int FDS_SeekCycles = 0;
 
+/* Side switching. Swapping the data under a running BIOS makes it hang,
+   so the drive has to go empty for a while first (Phase 5). */
+static int FDS_EjectCountdown = 0; /* scanlines left with the drive empty */
+static int FDS_PendingSide = 0;
+#define FDS_EJECT_SCANLINES (262 * 20) /* about a third of a second */
+
+/* Write journal, held in DRAM[FDS_SAVE_OFFSET..] */
+struct FDS_SaveEntry
+{
+  DWORD dwOffset;  /* byte offset within the side  */
+  DWORD dwLength;  /* bytes written                */
+  DWORD dwDataOfs; /* offset within the payload    */
+  DWORD dwSide;
+};
+static struct FDS_SaveEntry FDS_SaveIndex[FDS_SAVE_MAX_ENTRIES];
+static int FDS_SaveCount = 0;
+static DWORD FDS_SaveUsed = 0; /* payload bytes allocated */
+static bool FDS_SaveDirty = false;
+
+/* The entry currently being filled by a write transfer, or -1 */
+static int FDS_WriteEntry = -1;
+
 /*-------------------------------------------------------------------*/
 /*  Interface used by the loader (main.cpp)                          */
 /*-------------------------------------------------------------------*/
@@ -131,6 +184,275 @@ void FDS_SetDiskImage(const BYTE *pImage, int nSides)
   FDS_DiskImage = pImage;
   FDS_DiskSides = nSides;
   FDS_CurrentSide = 0;
+}
+
+bool FDS_IsDiskLoaded(void)
+{
+  return FDS_DiskImage != NULL && FDS_DiskSides > 0;
+}
+
+/* Reports the side that will be in the drive once a swap in progress
+   finishes, which is what a caller wants to display. */
+int FDS_GetSide(void)
+{
+  return (FDS_EjectCountdown > 0) ? FDS_PendingSide : FDS_CurrentSide;
+}
+
+int FDS_GetSideCount(void)
+{
+  return FDS_DiskSides;
+}
+
+/*-------------------------------------------------------------------*/
+/*  Write journal                                                    */
+/*-------------------------------------------------------------------*/
+
+static BYTE *Map20_SaveBuf(void)
+{
+  return &DRAM[FDS_SAVE_OFFSET];
+}
+
+static BYTE *Map20_SavePayload(void)
+{
+  return &DRAM[FDS_SAVE_OFFSET + FDS_SAVE_HEADER_BYTES];
+}
+
+static void Map20_PutDword(BYTE *p, DWORD v)
+{
+  p[0] = (BYTE)v;
+  p[1] = (BYTE)(v >> 8);
+  p[2] = (BYTE)(v >> 16);
+  p[3] = (BYTE)(v >> 24);
+}
+
+static DWORD Map20_GetDword(const BYTE *p)
+{
+  return (DWORD)p[0] | ((DWORD)p[1] << 8) |
+         ((DWORD)p[2] << 16) | ((DWORD)p[3] << 24);
+}
+
+static void Map20_SaveReset(void)
+{
+  FDS_SaveCount = 0;
+  FDS_SaveUsed = 0;
+  FDS_WriteEntry = -1;
+  FDS_SaveDirty = false;
+  InfoNES_MemorySet(FDS_SaveIndex, 0, sizeof FDS_SaveIndex);
+}
+
+/* 8 KB buffer to hand to the NVRAM code in main.cpp */
+BYTE *FDS_GetSaveBuffer(void)
+{
+  return Map20_SaveBuf();
+}
+
+bool FDS_IsSaveDirty(void)
+{
+  return FDS_SaveDirty;
+}
+
+/* Pack the in-RAM index into the buffer, ready to be written to flash. */
+void FDS_SerializeSave(void)
+{
+  BYTE *p = Map20_SaveBuf();
+  int i;
+
+  Map20_PutDword(p + 0, FDS_SAVE_MAGIC);
+  Map20_PutDword(p + 4, (DWORD)FDS_SaveCount);
+  for (i = 0; i < FDS_SAVE_MAX_ENTRIES; i++)
+  {
+    BYTE *e = p + 8 + i * FDS_SAVE_ENTRY_BYTES;
+    Map20_PutDword(e + 0, FDS_SaveIndex[i].dwOffset);
+    Map20_PutDword(e + 4, FDS_SaveIndex[i].dwLength);
+    Map20_PutDword(e + 8, FDS_SaveIndex[i].dwDataOfs);
+    Map20_PutDword(e + 12, FDS_SaveIndex[i].dwSide);
+  }
+  FDS_SaveDirty = false;
+}
+
+/* Rebuild the index from whatever main.cpp loaded into the buffer.
+   An erased flash slot reads as 0xFF and simply fails the magic check. */
+void FDS_DeserializeSave(void)
+{
+  const BYTE *p = Map20_SaveBuf();
+  int i;
+
+  if (Map20_GetDword(p) != FDS_SAVE_MAGIC)
+  {
+    Map20_SaveReset();
+    return;
+  }
+
+  FDS_SaveCount = (int)Map20_GetDword(p + 4);
+  if (FDS_SaveCount < 0 || FDS_SaveCount > FDS_SAVE_MAX_ENTRIES)
+  {
+    Map20_SaveReset();
+    return;
+  }
+
+  FDS_SaveUsed = 0;
+  for (i = 0; i < FDS_SAVE_MAX_ENTRIES; i++)
+  {
+    const BYTE *e = p + 8 + i * FDS_SAVE_ENTRY_BYTES;
+    FDS_SaveIndex[i].dwOffset = Map20_GetDword(e + 0);
+    FDS_SaveIndex[i].dwLength = Map20_GetDword(e + 4);
+    FDS_SaveIndex[i].dwDataOfs = Map20_GetDword(e + 8);
+    FDS_SaveIndex[i].dwSide = Map20_GetDword(e + 12);
+  }
+
+  /* Distrust the stored bounds -- this came off flash. */
+  for (i = 0; i < FDS_SaveCount; i++)
+  {
+    DWORD end = FDS_SaveIndex[i].dwDataOfs + FDS_SaveIndex[i].dwLength;
+    if (FDS_SaveIndex[i].dwLength > FDS_SAVE_DATA_BYTES ||
+        end > FDS_SAVE_DATA_BYTES ||
+        end < FDS_SaveIndex[i].dwDataOfs)
+    {
+      Map20_SaveReset();
+      return;
+    }
+    if (end > FDS_SaveUsed)
+    {
+      FDS_SaveUsed = end;
+    }
+  }
+
+  FDS_WriteEntry = -1;
+  FDS_SaveDirty = false;
+}
+
+/* Overlay lookup on the read path. Returns -1 when the byte is not
+   journalled and the flash image should be used. */
+static inline int Map20_SaveLookup(int nSide, int nPos)
+{
+  int i;
+
+  for (i = 0; i < FDS_SaveCount; i++)
+  {
+    if (FDS_SaveIndex[i].dwSide != (DWORD)nSide)
+    {
+      continue;
+    }
+    if ((DWORD)nPos >= FDS_SaveIndex[i].dwOffset &&
+        (DWORD)nPos < FDS_SaveIndex[i].dwOffset + FDS_SaveIndex[i].dwLength)
+    {
+      return (int)(FDS_SaveIndex[i].dwDataOfs +
+                   ((DWORD)nPos - FDS_SaveIndex[i].dwOffset));
+    }
+  }
+  return -1;
+}
+
+/* Begin journalling a write transfer that starts at the current head. */
+static void Map20_SaveBeginWrite(void)
+{
+  int i;
+
+  FDS_WriteEntry = -1;
+
+  /* Rewriting the same block is the normal case, so reuse its entry and
+     its payload rather than growing the journal every time the player
+     saves. Only an exact match is reused: a partial overlap would need
+     splitting, and no game has been seen to do it. */
+  for (i = 0; i < FDS_SaveCount; i++)
+  {
+    if (FDS_SaveIndex[i].dwSide == (DWORD)FDS_CurrentSide &&
+        FDS_SaveIndex[i].dwOffset == (DWORD)FDS_DiskPos)
+    {
+      FDS_WriteEntry = i;
+      FDS_SaveIndex[i].dwLength = 0;
+      return;
+    }
+  }
+
+  if (FDS_SaveCount >= FDS_SAVE_MAX_ENTRIES)
+  {
+    return; /* journal full -- the write is dropped */
+  }
+
+  i = FDS_SaveCount;
+  FDS_SaveIndex[i].dwSide = (DWORD)FDS_CurrentSide;
+  FDS_SaveIndex[i].dwOffset = (DWORD)FDS_DiskPos;
+  FDS_SaveIndex[i].dwLength = 0;
+  FDS_SaveIndex[i].dwDataOfs = FDS_SaveUsed;
+  FDS_SaveCount++;
+  FDS_WriteEntry = i;
+}
+
+static void Map20_SaveWriteByte(BYTE byData)
+{
+  struct FDS_SaveEntry *e;
+  DWORD dwLimit;
+
+  if (FDS_WriteEntry < 0)
+  {
+    return;
+  }
+
+  e = &FDS_SaveIndex[FDS_WriteEntry];
+
+  /* A reused entry may only grow into the space it already owns; a fresh
+     one may grow into whatever is left at the tail. */
+  if (FDS_WriteEntry == FDS_SaveCount - 1)
+  {
+    dwLimit = FDS_SAVE_DATA_BYTES - e->dwDataOfs;
+  }
+  else
+  {
+    dwLimit = FDS_SaveIndex[FDS_WriteEntry + 1].dwDataOfs - e->dwDataOfs;
+  }
+
+  if (e->dwLength >= dwLimit)
+  {
+    return; /* out of room -- drop the rest of this block */
+  }
+
+  Map20_SavePayload()[e->dwDataOfs + e->dwLength] = byData;
+  e->dwLength++;
+  if (FDS_WriteEntry == FDS_SaveCount - 1 &&
+      e->dwDataOfs + e->dwLength > FDS_SaveUsed)
+  {
+    FDS_SaveUsed = e->dwDataOfs + e->dwLength;
+  }
+  FDS_SaveDirty = true;
+}
+
+/*-------------------------------------------------------------------*/
+/*  Side switching                                                   */
+/*-------------------------------------------------------------------*/
+
+void FDS_SetSide(int nSide)
+{
+  if (!FDS_IsDiskLoaded() || FDS_DiskSides < 2)
+  {
+    return;
+  }
+
+  nSide %= FDS_DiskSides;
+  if (nSide < 0)
+  {
+    nSide += FDS_DiskSides;
+  }
+
+  /* Eject first and let the drive sit empty for a moment. Swapping the
+     data underneath a running BIOS is what makes it hang. */
+  FDS_PendingSide = nSide;
+  FDS_DiskInserted = false;
+  FDS_EjectCountdown = FDS_EJECT_SCANLINES;
+  FDS_DiskPos = 0;
+  FDS_XferArmed = false;
+  FDS_SeekCycles = 0;
+  FDS_WriteEntry = -1;
+}
+
+void FDS_NextSide(void)
+{
+  FDS_SetSide(FDS_CurrentSide + 1);
+}
+
+void FDS_PrevSide(void)
+{
+  FDS_SetSide(FDS_CurrentSide - 1);
 }
 
 /*-------------------------------------------------------------------*/
@@ -219,6 +541,13 @@ void Map20_Init()
   FDS_SeekCycles = 0;
   FDS_DiskPos = 0;
   FDS_CurrentSide = 0;
+  FDS_EjectCountdown = 0;
+  FDS_PendingSide = 0;
+
+  /* The write journal is deliberately NOT reset here. main.cpp fills it
+     from flash via loadNVRAM() + FDS_DeserializeSave() before calling
+     InfoNES_Reset(), and clearing it now would throw the save away. */
+  FDS_WriteEntry = -1;
 
   /* The disk starts out in the drive. Modelling the "insert it yourself"
      prompt would only make the user press a button for no reason;
@@ -287,11 +616,9 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     break;
 
   case 0x4024: /* write data port */
-    /* Writing to the disk is Phase 5, so the byte is discarded -- but the
-       transfer still has to advance, otherwise a game that tries to save
-       would sit waiting for a byte-transfer IRQ that never comes. */
     if (Map20_DriveRunning() && !(FDS_Regs[5] & FDS_CTRL_READ_MODE))
     {
+      Map20_SaveWriteByte(byData);
       if (FDS_DiskPos < FDS_SIDE_SIZE - 1)
       {
         FDS_DiskPos++;
@@ -327,6 +654,7 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
       }
       FDS_XferArmed = false;
       FDS_SeekCycles = 0;
+      FDS_WriteEntry = -1;
     }
 
     if (!(byData & FDS_CTRL_MOTOR))
@@ -358,6 +686,11 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     {
       FDS_SeekCycles = FDS_SEEK_CYCLES;
       FDS_XferArmed = true;
+      if (!(byData & FDS_CTRL_READ_MODE))
+      {
+        /* A write transfer starts here; journal it from the current head. */
+        Map20_SaveBeginWrite();
+      }
     }
 
     /* Mirroring: 0 = vertical, 1 = horizontal, which is the opposite of
@@ -406,7 +739,15 @@ BYTE __not_in_flash_func(Map20_ReadApu)(WORD wAddr)
     byRet = 0;
     if (FDS_DiskInserted && FDS_DiskImage != NULL)
     {
-      byRet = FDS_DiskImage[FDS_CurrentSide * FDS_SIDE_SIZE + FDS_DiskPos];
+      int nSaved = Map20_SaveLookup(FDS_CurrentSide, FDS_DiskPos);
+      if (nSaved >= 0)
+      {
+        byRet = Map20_SavePayload()[nSaved];
+      }
+      else
+      {
+        byRet = FDS_DiskImage[FDS_CurrentSide * FDS_SIDE_SIZE + FDS_DiskPos];
+      }
       if (FDS_DiskPos < FDS_SIDE_SIZE - 1)
       {
         FDS_DiskPos++;
@@ -454,6 +795,19 @@ void __not_in_flash_func(Map20_VSync)()
 /*-------------------------------------------------------------------*/
 void __not_in_flash_func(Map20_HSync)()
 {
+  /*-----------------------------------------------------------------*/
+  /*  Side switching: finish the eject/insert cycle                  */
+  /*-----------------------------------------------------------------*/
+  if (FDS_EjectCountdown > 0)
+  {
+    if (--FDS_EjectCountdown == 0)
+    {
+      FDS_CurrentSide = FDS_PendingSide;
+      FDS_DiskPos = 0;
+      FDS_DiskInserted = true;
+    }
+  }
+
   /*-----------------------------------------------------------------*/
   /*  $4020-$4022 interval timer                                     */
   /*-----------------------------------------------------------------*/

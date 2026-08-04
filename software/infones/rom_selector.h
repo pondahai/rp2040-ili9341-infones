@@ -22,9 +22,10 @@ inline bool hasNVRAM(const uint8_t *data)
 {
     if (checkFDSMagic(data))
     {
-        // Disk writes are Phase 5; until then an FDS image gets no
-        // NVRAM slot, so nothing is loaded into SRAM at startup.
-        return false;
+        // An FDS image always gets a slot: it stores the disk write
+        // journal there rather than SRAM. Sized to match, so the slot
+        // layout is unchanged.
+        return true;
     }
     auto info1 = data[6];
     return info1 & 2;
