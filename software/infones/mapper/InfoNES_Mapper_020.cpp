@@ -48,8 +48,16 @@ static_assert(FDS_BIOS_OFFSET + FDS_BIOS_SIZE <= DRAM_SIZE,
 /*  the CPU is late, which is the forgiving direction to err in.      */
 /*-------------------------------------------------------------------*/
 
-#define FDS_BYTE_CYCLES 149  /* CPU cycles between bytes on real hardware */
-#define FDS_SEEK_CYCLES 200  /* delay after the transfer is (re)started   */
+/*  Counters run in thirds of a CPU cycle. A scanline is 341 PPU dots =
+ *  113.667 CPU cycles, and STEP_PER_SCANLINE rounds that to 114; over a
+ *  timer period of ~210 scanlines the rounding alone is worth two thirds
+ *  of a scanline, which is enough to move a raster split. Working in
+ *  thirds makes the per-scanline step exactly 341 and removes it.        */
+#define FDS_THIRDS 3
+#define FDS_SCANLINE_THIRDS 341 /* 341 PPU dots = 113.667 CPU cycles */
+
+#define FDS_BYTE_CYCLES (149 * FDS_THIRDS) /* real hardware byte period */
+#define FDS_SEEK_CYCLES (200 * FDS_THIRDS) /* delay after a (re)start   */
 
 /* $4025 bits */
 #define FDS_CTRL_MOTOR 0x01
@@ -156,6 +164,23 @@ static bool FDS_SaveDirty = false;
 
 /* The entry currently being filled by a write transfer, or -1 */
 static int FDS_WriteEntry = -1;
+
+/* Temporary instrumentation: reports once a second over the USB serial so
+   the IRQ rates can be compared against what the game should be seeing.
+   Set to 0 once the scrolling and audio behaviour is understood. */
+#define FDS_DEBUG_COUNTERS 1
+
+#if FDS_DEBUG_COUNTERS
+#define FDS_DEBUG_PERIOD (262 * 60) /* scanlines in about one second */
+static int FDS_DbgTick = 0;
+static int FDS_DbgTimerIrq = 0;
+static int FDS_DbgDiskIrq = 0;
+static int FDS_DbgCtrlWrites = 0;
+/* Ring of the last few mirroring changes: which scanline, and to what */
+static WORD FDS_DbgMirrLine[4];
+static BYTE FDS_DbgMirrVal[4];
+static int FDS_DbgMirrIdx = 0;
+#endif
 
 /*-------------------------------------------------------------------*/
 /*  Interface used by the loader (main.cpp)                          */
@@ -593,16 +618,32 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
   switch (wAddr)
   {
   case 0x4020: /* IRQ reload value, low byte */
+    if (!(FDS_Regs[3] & 0x01))
+    {
+      return;
+    }
     FDS_IrqLatch = (FDS_IrqLatch & 0xFF00) | byData;
     break;
 
   case 0x4021: /* IRQ reload value, high byte */
+    if (!(FDS_Regs[3] & 0x01))
+    {
+      return;
+    }
     FDS_IrqLatch = (WORD)((FDS_IrqLatch & 0x00FF) | ((WORD)byData << 8));
     break;
 
   case 0x4022: /* IRQ control */
+    /* Not writable while $4023 bit0 is clear. Without this gate a write
+       made with disk I/O disabled starts a timer that real hardware would
+       have ignored, and the spurious IRQs land in whatever the game does
+       on IRQ -- typically its music engine and mid-frame scroll writes. */
+    if (!(FDS_Regs[3] & 0x01))
+    {
+      return;
+    }
     FDS_IrqEnable = byData & 0x03;
-    FDS_IrqCounter = FDS_IrqLatch;
+    FDS_IrqCounter = (int)FDS_IrqLatch * FDS_THIRDS;
     if (!(FDS_IrqEnable & 0x02))
     {
       FDS_TimerIrqPending = false;
@@ -610,10 +651,17 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     break;
 
   case 0x4023: /* master I/O enable */
-    /* bit0 enables the disk registers, bit1 the sound unit. Nothing is
-       gated on it here: the BIOS sets up the timer before enabling, and
-       enforcing the gate is a good way to lose those writes. */
-    break;
+    /* bit0 enables the disk registers and the timer, bit1 the sound unit.
+       Clearing bit0 stops the timer and acknowledges both IRQ sources. */
+    FDS_Regs[3] = byData;
+    if (!(byData & 0x01))
+    {
+      FDS_IrqEnable = 0;
+      FDS_IrqCounter = 0;
+      FDS_TimerIrqPending = false;
+      FDS_XferIrqPending = false;
+    }
+    return;
 
   case 0x4024: /* write data port */
     if (Map20_DriveRunning() && !(FDS_Regs[5] & FDS_CTRL_READ_MODE))
@@ -634,6 +682,16 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     bool bNowRunning;
 
     byPrev = FDS_Regs[5];
+#if FDS_DEBUG_COUNTERS
+    FDS_DbgCtrlWrites++;
+    if ((byData ^ byPrev) & FDS_CTRL_MIRRORING)
+    {
+      FDS_DbgMirrLine[FDS_DbgMirrIdx & 3] = (WORD)PPU_Scanline;
+      FDS_DbgMirrVal[FDS_DbgMirrIdx & 3] =
+          (BYTE)((byData & FDS_CTRL_MIRRORING) ? 1 : 0);
+      FDS_DbgMirrIdx++;
+    }
+#endif
 
     /* Transfer stopping. The BIOS has just consumed the two CRC bytes
        that a real disk carries but an .fds image does not, so step the
@@ -795,6 +853,24 @@ void __not_in_flash_func(Map20_VSync)()
 /*-------------------------------------------------------------------*/
 void __not_in_flash_func(Map20_HSync)()
 {
+#if FDS_DEBUG_COUNTERS
+  if (++FDS_DbgTick >= FDS_DEBUG_PERIOD)
+  {
+    FDS_DbgTick = 0;
+    InfoNES_MessageBox(
+        "FDS timerIRQ/s=%d diskIRQ/s=%d latch=%d en=%02x $4023=%02x "
+        "$4025=%02x ctrlw=%d mirr=%d@%d,%d@%d,%d@%d,%d@%d",
+        FDS_DbgTimerIrq, FDS_DbgDiskIrq, (int)FDS_IrqLatch, FDS_IrqEnable,
+        FDS_Regs[3], FDS_Regs[5], FDS_DbgCtrlWrites,
+        FDS_DbgMirrVal[0], FDS_DbgMirrLine[0], FDS_DbgMirrVal[1],
+        FDS_DbgMirrLine[1], FDS_DbgMirrVal[2], FDS_DbgMirrLine[2],
+        FDS_DbgMirrVal[3], FDS_DbgMirrLine[3]);
+    FDS_DbgTimerIrq = 0;
+    FDS_DbgDiskIrq = 0;
+    FDS_DbgCtrlWrites = 0;
+  }
+#endif
+
   /*-----------------------------------------------------------------*/
   /*  Side switching: finish the eject/insert cycle                  */
   /*-----------------------------------------------------------------*/
@@ -813,17 +889,17 @@ void __not_in_flash_func(Map20_HSync)()
   /*-----------------------------------------------------------------*/
   if (FDS_IrqEnable & 0x02)
   {
-    FDS_IrqCounter -= STEP_PER_SCANLINE;
+    FDS_IrqCounter -= FDS_SCANLINE_THIRDS;
     if (FDS_IrqCounter <= 0)
     {
       if (FDS_IrqEnable & 0x01)
       {
         /* Repeat mode: reload, keeping the overshoot. A latch shorter
            than one scanline would otherwise fire only once per line. */
-        FDS_IrqCounter += FDS_IrqLatch;
+        FDS_IrqCounter += (int)FDS_IrqLatch * FDS_THIRDS;
         if (FDS_IrqCounter <= 0)
         {
-          FDS_IrqCounter = FDS_IrqLatch;
+          FDS_IrqCounter = (int)FDS_IrqLatch * FDS_THIRDS;
         }
       }
       else
@@ -833,6 +909,9 @@ void __not_in_flash_func(Map20_HSync)()
       }
       FDS_TimerIrqPending = true;
       IRQ_REQ;
+#if FDS_DEBUG_COUNTERS
+      FDS_DbgTimerIrq++;
+#endif
     }
   }
 
@@ -847,7 +926,7 @@ void __not_in_flash_func(Map20_HSync)()
     }
     else
     {
-      FDS_SeekCycles -= STEP_PER_SCANLINE;
+      FDS_SeekCycles -= FDS_SCANLINE_THIRDS;
       if (FDS_SeekCycles <= 0)
       {
         /* The byte is now sitting in the read register. Stop the clock
@@ -857,6 +936,9 @@ void __not_in_flash_func(Map20_HSync)()
         if (FDS_Regs[5] & FDS_CTRL_IRQ_ENABLE)
         {
           IRQ_REQ;
+#if FDS_DEBUG_COUNTERS
+          FDS_DbgDiskIrq++;
+#endif
         }
       }
     }
