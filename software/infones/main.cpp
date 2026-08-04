@@ -610,12 +610,44 @@ void InfoNES_MessageBox(const char *pszMsg, ...)
 
 // Build a synthetic iNES header for an .fds image so that the existing
 // InfoNES_Reset() path (mapper lookup, SetupPPU, ...) can run unchanged.
+#define FDS_MAX_SIDES 8
+
 static bool parseFDS(const uint8_t *fdsFile)
 {
-    int sides = fdsFile[4];
+    const uint8_t *sideData;
+    int sides;
+
+    if (checkFDSHeader(fdsFile))
+    {
+        sideData = fdsFile + 16;
+        sides = fdsFile[4];
+    }
+    else
+    {
+        // Headerless image: the sides are simply concatenated, so count
+        // them by looking for a disk info block at each side boundary.
+        sideData = fdsFile;
+        sides = 0;
+    }
+
+    // Trust the boundaries rather than the header's side count: a wrong
+    // count here would have the mapper read past the end of the image.
+    {
+        int n = 0;
+        while (n < FDS_MAX_SIDES &&
+               checkFDSDiskInfoBlock(sideData + (size_t)n * FDS_SIDE_SIZE))
+        {
+            n++;
+        }
+        if (sides < 1 || sides > n)
+        {
+            sides = n;
+        }
+    }
+
     if (sides < 1)
     {
-        printf("FDS image reports %d sides.\n", sides);
+        printf("No FDS disk info block found; not a usable image.\n");
         return false;
     }
 
@@ -641,8 +673,9 @@ static bool parseFDS(const uint8_t *fdsFile)
     ROM = nullptr;
     VROM = nullptr;
 
-    FDS_SetDiskImage(fdsFile + 16, sides);
-    printf("FDS disk image: %d side(s) at %p\n", sides, fdsFile + 16);
+    FDS_SetDiskImage(sideData, sides);
+    printf("FDS disk image: %d side(s) at %p (%s header)\n", sides, sideData,
+           checkFDSHeader(fdsFile) ? "fwNES" : "no");
     return true;
 }
 

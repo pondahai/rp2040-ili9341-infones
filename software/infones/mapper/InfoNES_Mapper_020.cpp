@@ -93,17 +93,25 @@ static_assert(FDS_BIOS_OFFSET + FDS_BIOS_SIZE <= DRAM_SIZE,
 /*                                                                   */
 /*    magic          4 bytes                                          */
 /*    entry count    4 bytes                                          */
+/*    fingerprint    4 bytes                                          */
+/*    reserved       4 bytes                                          */
 /*    entries        8 x 16 bytes                                     */
 /*    payload        the rest                                         */
 /*                                                                   */
 /*  Serialised byte by byte, so nothing depends on DRAM's alignment.  */
+/*                                                                   */
+/*  The fingerprint identifies the disk the journal belongs to. NVRAM */
+/*  slots are handed out by index, so burning a different game reuses */
+/*  slot 0 and would otherwise overlay the previous game's writes on  */
+/*  top of the new disk -- which corrupts it badly enough that the    */
+/*  BIOS cannot read the disk at all.                                 */
 /*-------------------------------------------------------------------*/
 
 #define FDS_SAVE_OFFSET 0x8000
-#define FDS_SAVE_MAGIC 0x30534446UL /* "FDS0" */
+#define FDS_SAVE_MAGIC 0x31534446UL /* "FDS1" */
 #define FDS_SAVE_MAX_ENTRIES 8
 #define FDS_SAVE_ENTRY_BYTES 16
-#define FDS_SAVE_HEADER_BYTES (8 + FDS_SAVE_MAX_ENTRIES * FDS_SAVE_ENTRY_BYTES)
+#define FDS_SAVE_HEADER_BYTES (16 + FDS_SAVE_MAX_ENTRIES * FDS_SAVE_ENTRY_BYTES)
 #define FDS_SAVE_DATA_BYTES (FDS_SAVE_SIZE - FDS_SAVE_HEADER_BYTES)
 
 static_assert(FDS_SAVE_OFFSET + FDS_SAVE_SIZE <= DRAM_SIZE,
@@ -176,10 +184,13 @@ static int FDS_DbgTick = 0;
 static int FDS_DbgTimerIrq = 0;
 static int FDS_DbgDiskIrq = 0;
 static int FDS_DbgCtrlWrites = 0;
-/* Ring of the last few mirroring changes: which scanline, and to what */
-static WORD FDS_DbgMirrLine[4];
-static BYTE FDS_DbgMirrVal[4];
-static int FDS_DbgMirrIdx = 0;
+/* Ring of the scanlines the last few timer IRQs fired on. If the game is
+   using the timer for a raster split, these should be the same number
+   every frame; a creeping value is the split walking up the screen. */
+static WORD FDS_DbgFireLine[8];
+static int FDS_DbgFireIdx = 0;
+/* And where the game re-arms it, which is what the fire line is relative to */
+static WORD FDS_DbgArmLine = 0;
 #endif
 
 /*-------------------------------------------------------------------*/
@@ -256,6 +267,28 @@ static DWORD Map20_GetDword(const BYTE *p)
          ((DWORD)p[2] << 16) | ((DWORD)p[3] << 24);
 }
 
+/* Identifies the disk currently loaded. The disk info block carries the
+   maker, game name and revision, so the first 64 bytes of side 0 plus the
+   side count separate any two games that matter. */
+static DWORD Map20_DiskFingerprint(void)
+{
+  DWORD dw = 0x811C9DC5UL; /* FNV-1a */
+  int i;
+
+  if (FDS_DiskImage == NULL)
+  {
+    return 0;
+  }
+  for (i = 0; i < 64; i++)
+  {
+    dw ^= FDS_DiskImage[i];
+    dw *= 16777619UL;
+  }
+  dw ^= (DWORD)FDS_DiskSides;
+  dw *= 16777619UL;
+  return dw;
+}
+
 static void Map20_SaveReset(void)
 {
   FDS_SaveCount = 0;
@@ -284,9 +317,11 @@ void FDS_SerializeSave(void)
 
   Map20_PutDword(p + 0, FDS_SAVE_MAGIC);
   Map20_PutDword(p + 4, (DWORD)FDS_SaveCount);
+  Map20_PutDword(p + 8, Map20_DiskFingerprint());
+  Map20_PutDword(p + 12, 0);
   for (i = 0; i < FDS_SAVE_MAX_ENTRIES; i++)
   {
-    BYTE *e = p + 8 + i * FDS_SAVE_ENTRY_BYTES;
+    BYTE *e = p + 16 + i * FDS_SAVE_ENTRY_BYTES;
     Map20_PutDword(e + 0, FDS_SaveIndex[i].dwOffset);
     Map20_PutDword(e + 4, FDS_SaveIndex[i].dwLength);
     Map20_PutDword(e + 8, FDS_SaveIndex[i].dwDataOfs);
@@ -308,6 +343,16 @@ void FDS_DeserializeSave(void)
     return;
   }
 
+  if (Map20_GetDword(p + 8) != Map20_DiskFingerprint())
+  {
+    /* The slot belongs to a different disk -- almost certainly the game
+       that was burned here before this one. Applying it would corrupt
+       the image. */
+    InfoNES_MessageBox("FDS save slot belongs to another disk, ignoring");
+    Map20_SaveReset();
+    return;
+  }
+
   FDS_SaveCount = (int)Map20_GetDword(p + 4);
   if (FDS_SaveCount < 0 || FDS_SaveCount > FDS_SAVE_MAX_ENTRIES)
   {
@@ -318,7 +363,7 @@ void FDS_DeserializeSave(void)
   FDS_SaveUsed = 0;
   for (i = 0; i < FDS_SAVE_MAX_ENTRIES; i++)
   {
-    const BYTE *e = p + 8 + i * FDS_SAVE_ENTRY_BYTES;
+    const BYTE *e = p + 16 + i * FDS_SAVE_ENTRY_BYTES;
     FDS_SaveIndex[i].dwOffset = Map20_GetDword(e + 0);
     FDS_SaveIndex[i].dwLength = Map20_GetDword(e + 4);
     FDS_SaveIndex[i].dwDataOfs = Map20_GetDword(e + 8);
@@ -644,6 +689,12 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     }
     FDS_IrqEnable = byData & 0x03;
     FDS_IrqCounter = (int)FDS_IrqLatch * FDS_THIRDS;
+#if FDS_DEBUG_COUNTERS
+    if (byData & 0x02)
+    {
+      FDS_DbgArmLine = (WORD)PPU_Scanline;
+    }
+#endif
     if (!(FDS_IrqEnable & 0x02))
     {
       FDS_TimerIrqPending = false;
@@ -684,13 +735,6 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     byPrev = FDS_Regs[5];
 #if FDS_DEBUG_COUNTERS
     FDS_DbgCtrlWrites++;
-    if ((byData ^ byPrev) & FDS_CTRL_MIRRORING)
-    {
-      FDS_DbgMirrLine[FDS_DbgMirrIdx & 3] = (WORD)PPU_Scanline;
-      FDS_DbgMirrVal[FDS_DbgMirrIdx & 3] =
-          (BYTE)((byData & FDS_CTRL_MIRRORING) ? 1 : 0);
-      FDS_DbgMirrIdx++;
-    }
 #endif
 
     /* Transfer stopping. The BIOS has just consumed the two CRC bytes
@@ -858,13 +902,12 @@ void __not_in_flash_func(Map20_HSync)()
   {
     FDS_DbgTick = 0;
     InfoNES_MessageBox(
-        "FDS timerIRQ/s=%d diskIRQ/s=%d latch=%d en=%02x $4023=%02x "
-        "$4025=%02x ctrlw=%d mirr=%d@%d,%d@%d,%d@%d,%d@%d",
+        "FDS tIRQ/s=%d dIRQ/s=%d latch=%d en=%02x arm@%d fire=%d,%d,%d,%d,%d,%d,%d,%d",
         FDS_DbgTimerIrq, FDS_DbgDiskIrq, (int)FDS_IrqLatch, FDS_IrqEnable,
-        FDS_Regs[3], FDS_Regs[5], FDS_DbgCtrlWrites,
-        FDS_DbgMirrVal[0], FDS_DbgMirrLine[0], FDS_DbgMirrVal[1],
-        FDS_DbgMirrLine[1], FDS_DbgMirrVal[2], FDS_DbgMirrLine[2],
-        FDS_DbgMirrVal[3], FDS_DbgMirrLine[3]);
+        FDS_DbgArmLine,
+        FDS_DbgFireLine[0], FDS_DbgFireLine[1], FDS_DbgFireLine[2],
+        FDS_DbgFireLine[3], FDS_DbgFireLine[4], FDS_DbgFireLine[5],
+        FDS_DbgFireLine[6], FDS_DbgFireLine[7]);
     FDS_DbgTimerIrq = 0;
     FDS_DbgDiskIrq = 0;
     FDS_DbgCtrlWrites = 0;
@@ -911,6 +954,8 @@ void __not_in_flash_func(Map20_HSync)()
       IRQ_REQ;
 #if FDS_DEBUG_COUNTERS
       FDS_DbgTimerIrq++;
+      FDS_DbgFireLine[FDS_DbgFireIdx & 7] = (WORD)PPU_Scanline;
+      FDS_DbgFireIdx++;
 #endif
     }
   }
