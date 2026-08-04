@@ -26,6 +26,7 @@
 #include "InfoNES.h"
 #include "InfoNES_System.h"
 #include "InfoNES_pAPU.h"
+#include "InfoNES_Mapper.h"
 
 //#include <dvi/dvi.h>
 #include <tusb.h>
@@ -561,8 +562,50 @@ void InfoNES_MessageBox(const char *pszMsg, ...)
     printf("\n");
 }
 
+// Build a synthetic iNES header for an .fds image so that the existing
+// InfoNES_Reset() path (mapper lookup, SetupPPU, ...) can run unchanged.
+static bool parseFDS(const uint8_t *fdsFile)
+{
+    int sides = fdsFile[4];
+    if (sides < 1)
+    {
+        printf("FDS image reports %d sides.\n", sides);
+        return false;
+    }
+
+    if (!FDS_IsBiosPresent())
+    {
+        printf("FDS BIOS (%s) not loaded, cannot start disk image.\n", FDS_BIOS_FILE);
+        return false;
+    }
+
+    memset(&NesHeader, 0, sizeof(NesHeader));
+    memcpy(NesHeader.byID, "NES\x1a", 4);
+    NesHeader.byRomSize = 0;  // no PRG ROM: $8000-$DFFF is RAM
+    NesHeader.byVRomSize = 0; // no CHR ROM: the FDS uses CHR RAM
+    // Mapper 20 == 0x14, split across the two info bytes.
+    // Bit 1 of byInfo1 sets ROM_SRAM so that $6000-$7FFF maps to SRAM[].
+    // Bit 0 = 1 is vertical mirroring, matching $4025 = 0 at power-on;
+    // Map20_Apu() takes over from there.
+    NesHeader.byInfo1 = 0x40 | 0x02 | 0x01;
+    NesHeader.byInfo2 = 0x10;
+
+    memset(SRAM, 0, SRAM_SIZE);
+
+    ROM = nullptr;
+    VROM = nullptr;
+
+    FDS_SetDiskImage(fdsFile + 16, sides);
+    printf("FDS disk image: %d side(s) at %p\n", sides, fdsFile + 16);
+    return true;
+}
+
 bool parseROM(const uint8_t *nesFile)
 {
+    if (checkFDSMagic(nesFile))
+    {
+        return parseFDS(nesFile);
+    }
 
     memcpy(&NesHeader, nesFile, sizeof(NesHeader));
     if (!checkNESMagic(NesHeader.byID))
@@ -1460,6 +1503,39 @@ void display_clear()
 
 }
 
+// Read the FDS BIOS from the SD card into its slot inside DRAM. Called once
+// per boot, after the card is mounted and before the emulator starts.
+// A missing BIOS is not an error: it only means .fds images cannot be run,
+// and the menu says so.
+static void loadFDSBios()
+{
+    FIL fil;
+    FRESULT fr;
+    UINT bytesRead = 0;
+
+    FDS_SetBiosPresent(false);
+
+    fr = f_open(&fil, FDS_BIOS_FILE, FA_READ);
+    if (fr != FR_OK)
+    {
+        printf("No %s on SD card, FDS images disabled (%d)\n", FDS_BIOS_FILE, fr);
+        return;
+    }
+
+    fr = f_read(&fil, FDS_GetBiosBuffer(), FDS_BIOS_SIZE, &bytesRead);
+    f_close(&fil);
+
+    if (fr != FR_OK || bytesRead != FDS_BIOS_SIZE)
+    {
+        printf("%s is not a valid %d byte BIOS (read %u, err %d)\n",
+               FDS_BIOS_FILE, FDS_BIOS_SIZE, bytesRead, fr);
+        return;
+    }
+
+    FDS_SetBiosPresent(true);
+    printf("FDS BIOS loaded from %s\n", FDS_BIOS_FILE);
+}
+
 bool initSDCard()
 {
     FRESULT fr;
@@ -1637,6 +1713,10 @@ int main()
     // InfoNES_Main();
 
     isFatalError = !initSDCard();
+    if (!isFatalError)
+    {
+        loadFDSBios();
+    }
     // When a game is started from the menu, the menu will reboot the device.
     // After reboot the emulator will start the selected game.
     if (watchdog_caused_reboot() && isFatalError == false)

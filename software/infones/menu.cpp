@@ -58,6 +58,23 @@ struct charCell
 #define SCREENBUFCELLS SCREEN_ROWS *SCREEN_COLS
 static charCell *screenBuffer;
 
+// Whether the FDS BIOS is on the SD card. Checked once when the menu starts;
+// without it .fds images cannot be run, so the menu says so and refuses to
+// flash one.
+static bool fdsBiosOnCard = false;
+
+static bool isFDSImage(const char *path)
+{
+    return Frens::cstr_endswith(path, ".fds") || Frens::cstr_endswith(path, ".FDS");
+}
+
+static void checkFDSBios()
+{
+    FILINFO fno;
+    fdsBiosOnCard = (f_stat(FDS_BIOS_FILE, &fno) == FR_OK);
+    printf("FDS BIOS %s: %s\n", FDS_BIOS_FILE, fdsBiosOnCard ? "found" : "not found");
+}
+
 #define UP 9
 #define DN 5
 #define LT 8
@@ -276,6 +293,10 @@ void displayRoms(Frens::RomLister romlister, int startIndex)
             y++;
         }
     }
+    if (!fdsBiosOnCard)
+    {
+        putText(1, SCREEN_ROWS - 2, "No " FDS_BIOS_FILE ": .fds disabled", CRED, bgcolor);
+    }
 }
 
 void DisplayFatalError(char *error)
@@ -455,6 +476,7 @@ void menu(uintptr_t NES_FILE_ADDR, char *errorMessage, bool isFatal)
         showSplash = false;
         showSplashScreen();
     }
+    checkFDSBios();
     romlister.list("/");
     displayRoms(romlister, firstVisibleRowINDEX);
     while (1)
@@ -572,6 +594,15 @@ void menu(uintptr_t NES_FILE_ADDR, char *errorMessage, bool isFatal)
                     romlister.list(selectedRomOrFolder);
                     firstVisibleRowINDEX = 0;
                     selectedRow = STARTROW;
+                    displayRoms(romlister, firstVisibleRowINDEX);
+                }
+                else if (isFDSImage(selectedRomOrFolder) && !fdsBiosOnCard)
+                {
+                    // Flashing the image would only lead to a black screen
+                    // after the reboot, so refuse here where we can explain.
+                    snprintf(globalErrorMessage, 40, "Missing %s on SD card", FDS_BIOS_FILE);
+                    DisplayEmulatorErrorMessage(globalErrorMessage);
+                    globalErrorMessage[0] = 0;
                     displayRoms(romlister, firstVisibleRowINDEX);
                 }
                 else

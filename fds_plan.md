@@ -2,9 +2,11 @@
 
 目標專案：`software/infones/`（RP2040 + ILI9341）
 擬定日期：2026-08-04
-狀態：**計畫階段，尚未動工**
+狀態：**Phase 1、2 已完成並通過實機驗證**（2026-08-04，分支 `feature/fds-phase1-2`）
+　　　Phase 3 以後尚未動工
 
 相關文件：[`claude_opus_5_analysis.md`](claude_opus_5_analysis.md)（現況架構分析）
+實作結果：見文末第 6 節
 
 ---
 
@@ -17,7 +19,7 @@
 
 | 項目 | 結論 |
 |---|---|
-| 記憶體 | 只需新增 **24 KB**，現有餘裕約 174 KB ✅ |
+| 記憶體 | ~~只需新增 **24 KB**~~ → 實測**完全不需新增**，見 6.1 ✅ |
 | Flash | 四面 `.fds` = 262 KB，餘裕 1.5 MB ✅ |
 | CPU 核心改動 | **不需要** ✅ |
 | InfoNES 現成支援 | **完全沒有**，mapper 20 需從零實作 ⚠️ |
@@ -28,15 +30,18 @@
 
 ## 1. 可行性查證
 
-### 1.1 記憶體：只需要多 24 KB
+### 1.1 記憶體：~~只需要多 24 KB~~ → 一點都不用多
+
+> ⚠️ **本節的結論在實作時被推翻，實際不需要新增任何記憶體。**
+> 下表保留原始評估，修正見 6.1。
 
 FDS 的 RAM 是 $6000–$DFFF 共 32 KB，但本專案已經有大半可以沿用：
 
 | 位址區段 | 現況 | FDS 需求 |
 |---|---|---|
 | $6000–$7FFF | `SRAM[0x2000]`（`InfoNES.cpp:78`）已存在 | 直接沿用 |
-| $8000–$DFFF | `ROMBANK[0..2]` 三個指標 | **需新增 24 KB 陣列** |
-| $E000–$FFFF | `ROMBANK[3]` | 指向 flash 裡的 BIOS，零複製 |
+| $8000–$DFFF | `ROMBANK[0..2]` 三個指標 | ~~**需新增 24 KB 陣列**~~ 沿用 `DRAM[]` |
+| $E000–$FFFF | `ROMBANK[3]` | ~~指向 flash 裡的 BIOS~~ 改放 `DRAM[]`，見 6.3 |
 | CHR RAM 8 KB | `PPURAM[0x4000]`（16 KB）已含 | 直接沿用，同無 VROM 的卡帶 |
 
 現有記憶體用量粗估（未實際編譯，僅靜態估算）：
@@ -64,6 +69,10 @@ FatFs + 其他   ~4 KB
 > `InfoNES.cpp:236` 那行註解掉的只是舊的重複宣告，不要誤判成沒佔記憶體。
 
 即使把 FDS 的 24 KB 加上去也只到約 114 KB，仍有 150 KB 餘裕。
+
+> **上面這份清單漏了 `DRAM[0xA000]`（40 KB，`InfoNES_Mapper.cpp:24`）。**
+> 這個疏漏反而是好消息——那 40 KB 本來就已經配置，而且正是為 Disk System 準備的，
+> 見 6.1。實測 `bss` 為 190,728 bytes（約 186 KB / 264 KB），比這裡的靜態估算高不少。
 
 ### 1.2 Mapper 掛鉤介面已經齊全
 
@@ -137,11 +146,24 @@ FDS 遊戲會寫回磁碟，這是它與卡帶最大的差別。
 
 **驗收標準**：能在 menu 看到 `.fds` 檔案、選取後重開機不當機（黑屏可接受）。
 
+> ✅ **已達成**（2026-08-04）。實機 serial log：
+>
+> ```
+> Single FDS disk image, 2 side(s).
+> FDS BIOS loaded from /disksys.rom
+> Now playing: Armana no Kiseki (Japan)
+> FDS disk image: 2 side(s) at 10080010
+> ```
+>
+> `10080010` = `NES_FILE_ADDR + 16`，確認 fwNES header 被正確跳過。
+
 ---
 
 ### Phase 2：記憶體映射
 
 **工作量**：約 80 行，新檔 `mapper/InfoNES_Mapper_020.cpp`
+
+原始構想（**實作時有調整，見下方**）：
 
 ```c
 static BYTE FDS_PrgRam[0x6000];   // $8000-$DFFF，24 KB
@@ -161,6 +183,20 @@ void Map20_Write(WORD addr, BYTE data) {   // $8000-$FFFF 的寫入
 }
 ```
 
+實際採用的版本改用既有的 `DRAM[]`，且 `InfoNES_SetupChr()` 不需要呼叫
+（`byVRomSize == 0` 時 `InfoNES_SetupPPU()` 已經把 `PPUBANK[]` 指好了，
+Map0 也只在有 VROM 時才呼叫它）：
+
+```c
+#define FDS_PRGRAM_OFFSET 0x0000   // DRAM[0x0000..0x5FFF] → $8000-$DFFF
+#define FDS_BIOS_OFFSET   0x6000   // DRAM[0x6000..0x7FFF] → $E000-$FFFF
+
+ROMBANK0 = &DRAM[FDS_PRGRAM_OFFSET + 0x0000];
+ROMBANK1 = &DRAM[FDS_PRGRAM_OFFSET + 0x2000];
+ROMBANK2 = &DRAM[FDS_PRGRAM_OFFSET + 0x4000];
+ROMBANK3 = &DRAM[FDS_BIOS_OFFSET];
+```
+
 同時在 `InfoNES_Mapper.cpp:30` 的 `MapperTable` 補上 `{20, Map20_Init}`，
 並在 `InfoNES_Mapper.h` 宣告。
 
@@ -169,6 +205,14 @@ void Map20_Write(WORD addr, BYTE data) {   // $8000-$FFFF 的寫入
 
 **驗收標準**：**BIOS 開機畫面出現**（轉圈的 Disk System logo）。
 這是最重要的里程碑，代表 CPU、記憶體、PPU 三者全部接通。
+
+> ✅ **已達成**（2026-08-04）。實機上磁碟系統畫面與聲音都正常出現。
+> 有聲音是額外的訊號——那是 NES 內建 APU，代表 pAPU 在 mapper 20 下也正常
+> （FDS 專屬波表音源仍在 Phase 6）。
+>
+> 讓 BIOS 走到這一步所需的暫存器回報比預期少：$4030–$4033 只要回報
+> 「磁碟機沒插片（`0x07`）+ 電池正常（`0x80`）」即可，
+> **$4020–$4022 完全沒實作也不影響**——見 6.2。
 
 ---
 
@@ -204,6 +248,11 @@ BIOS 讀走。時序掛在 `MapperHSync()` 上。
 > 如果 BIOS 卡在讀取畫面不動，八成是這裡。
 
 IRQ 觸發使用 `K6502.h:51` 的 `IRQ_REQ` 巨集。
+
+> **Phase 2 完成後的補充**：$4020–$4022 的 IRQ 計時器原本被列為「可能擋住 Phase 2
+> 驗收」的風險，實測**沒有**——BIOS 不靠它就能走完開機流程。但 Phase 3 仍然必須實作它，
+> 因為磁碟傳輸的時序依賴它。目前 `Map20_Apu()` 對這三個位址是空的 `default` 分支，
+> `Map20_HSync()` 也是空的，兩處都留了註解標示 Phase 3 的接手點。
 
 **驗收標準**：BIOS 能讀出磁碟第一個 block 並通過 CRC 檢查。
 
@@ -286,11 +335,15 @@ SD 在 spi1、LCD 在 spi0，匯流排雖然分開，但 `f_write()` 會阻塞�
 - 預設採用 flash NVRAM 存檔（Phase 0 決策三）
 - **若最終決定要在遊戲中寫 SD，Phase 5 之前必須先修掉 4.2**
 
-### 風險二：`menu.cpp` 借用 `PPURAM` 當燒錄緩衝 ⚠️ 中
+### 風險二：`menu.cpp` 借用 `PPURAM` 當燒錄緩衝 ⚠️ 中 → ✅ 未發生
 
 `menu.cpp:592` 以 `InfoNes_GetPPURAM(&bufsize)` 取得 PPURAM 當作 flash 寫入暫存區。
 FDS 映像燒錄可沿用同一招，但需確認此時 FDS 的 24 KB PRG RAM 尚未初始化，
 否則兩者會互相踩踏。
+
+> **實作後確認不成立。** 兩者用的是不同陣列（燒錄用 `PPURAM`，FDS PRG RAM 在 `DRAM`），
+> 而且 menu 燒錄完成後會透過 watchdog 重開機，`Map20_Init()` 是重開後才執行的，
+> 時間上也不重疊。燒錄流程完全沒有修改。
 
 ### 風險三：時序粒度 ⚠️ 中
 
@@ -308,10 +361,10 @@ FDS 的 mapper 邏輯僅在磁碟 I/O 時運作，對每幀成本影響很小。
 ## 4. 執行順序
 
 ```
-Phase 0（決策）
-   └─> Phase 1（載入路徑）
-         └─> Phase 2（記憶體映射）   ← 【BIOS 開機畫面出現】
-               └─> Phase 3（狀態機）
+Phase 0（決策）                        ✅ 已定案
+   └─> Phase 1（載入路徑）             ✅ 已完成
+         └─> Phase 2（記憶體映射）     ✅ 【BIOS 開機畫面出現】← 目前位置
+               └─> Phase 3（狀態機）   ← 下一步
                      └─> Phase 4（資料流）   ← 【遊戲可玩】
                            ├─> Phase 5（換片＋存檔）
                            └─> Phase 6（擴充音源，可選）
@@ -344,11 +397,101 @@ software/infones/mapper/InfoNES_Mapper_020.cpp    FDS mapper 與磁碟控制器
 | `main.cpp` | `:564` | `parseROM()` 加 FDS 分支 |
 | `main.cpp` | `:319` | NVRAM slot 配置擴充（Phase 5） |
 | `main.cpp` | `:419` | 換片組合鍵（Phase 5） |
-| `menu.cpp` | `:575` | FDS 映像標記 |
-| `CMakeLists.txt` | `:25` | 加入新的 mapper 原始檔 |
+| `menu.cpp` | `:575` | ~~FDS 映像標記~~ → 改為 BIOS 缺席提示與阻擋燒錄 |
+| ~~`CMakeLists.txt`~~ | ~~`:25`~~ | ~~加入新的 mapper 原始檔~~ **不需要**，見 6.2 |
+| `rom_selector.h` | — | （計畫未列到）辨識 FDS magic，避免走 TAR 解析 |
+| `menu.h` | — | （計畫未列到）`FDS_BIOS_FILE` 常數 |
 | `InfoNES_System.h` | `:72` | `wave6` 參數（Phase 6，可選） |
 | `InfoNES_pAPU.cpp` | `:1189` | 同上 |
 
 ---
 
-*本文件為實作計畫，尚未包含任何程式碼改動。*
+---
+
+## 6. Phase 1、2 實作結果（2026-08-04）
+
+分支 `feature/fds-phase1-2`。**驗收標準「BIOS 開機畫面出現」已在實機達成**，
+磁碟系統畫面與聲音都正常。
+
+| commit | 內容 |
+|---|---|
+| `5fe12d6` | FDS Phase 1+2 |
+| `32aaa04` | `.gitignore`（BIOS、磁碟映像、build 產出） |
+| `35c63d2` | 補上 9 個從未被 commit 的 mapper 檔（既有問題，與 FDS 無關） |
+| `06f13a9` | `CMakeLists.txt` 的 `PICO_SDK_PATH` 修正（分析文件 4.7） |
+
+### 6.1 出入一：不需要新增 24 KB，實測成本 4 bytes
+
+`InfoNES_Mapper.cpp:24` 早就有 `BYTE DRAM[DRAM_SIZE]`，`DRAM_SIZE` 為 `0xA000`
+（40 KB，`InfoNES_Mapper.h:22`），註解寫的正是 *Disk System RAM*——這是上游 InfoNES
+為 FDS 預留的，目前只有 mapper 235 借去用。FDS 需要的 $8000–$FFFF 共 32 KB
+剛好放得進去：
+
+```
+DRAM[0x0000..0x5FFF]  →  $8000-$DFFF  PRG RAM  24 KB
+DRAM[0x6000..0x7FFF]  →  $E000-$FFFF  BIOS      8 KB
+DRAM[0x8000..0x9FFF]  →  未使用        8 KB
+```
+
+實測（`arm-none-eabi-size`，Release）：
+
+| | text（flash） | bss（RAM） |
+|---|---|---|
+| `main` | 351,900 | 190,728 |
+| Phase 1+2 | 353,540 | 190,732 |
+| **差** | **+1,640 B** | **+4 B** |
+
+那 4 bytes 是幾個 static 旗標與指標。第 1.1 節預算的 24 KB 完全省下。
+
+### 6.2 出入二：`CMakeLists.txt` 不需要修改
+
+第 5 節列了「`CMakeLists.txt:25` 加入新的 mapper 原始檔」，實際上不需要——
+mapper 是被 `#include` 進 `InfoNES_Mapper.cpp` 的（見該檔 `:175` 起的一長串
+`#include "mapper/..."`），不是獨立的編譯單元。新增 mapper 只要三處：
+建立檔案、`MapperTable` 加一列、加一行 `#include`。
+
+（`06f13a9` 確實動了 `CMakeLists.txt`，但那是修 SDK 路徑，與 FDS 無關。）
+
+### 6.3 BIOS 放在 RAM 而非 flash
+
+第 1.1 節原本規劃 `ROMBANK3` 指向 flash 裡的 BIOS 走 XIP、零複製。
+實作改成開機時從 SD 讀 8 KB 進 `DRAM[0x6000]`，理由是 menu 的燒錄迴圈
+以 16 KB 為單位串流寫入，要在中間插一段 BIOS 會把那段邏輯弄複雜；
+而 `DRAM` 反正已經存在。副作用是 $E000–$FFFF 的存取比 XIP 更快。
+
+BIOS 載入時機在 `initSDCard()` 成功之後、模擬器啟動之前，每次開機一次。
+找不到 `/disksys.rom` 時不視為錯誤：menu 底部顯示紅字提示，
+且選取 `.fds` 會被擋下並說明原因，不會燒錄後重開機進黑屏。
+
+### 6.4 讓 BIOS 開機所需的暫存器比預期少
+
+Phase 3 的十個暫存器一個都沒實作，BIOS 仍能走完開機流程。只需要：
+
+- `$4032` 回報 `0x07`（沒插片、未就緒、防寫）
+- `$4033` 回報 `0x80`（電池正常）——這個**必要**，回報電池沒電 BIOS 會拒絕開機
+- `$4025` bit3 的鏡像切換（屬於記憶體映射，含在 Phase 2）
+
+`$4020–$4022` 的 IRQ 計時器原列為 Phase 2 的最大風險，實測不影響開機畫面。
+
+### 6.5 順帶修掉的既有問題
+
+兩個與 FDS 無關、但擋住建置的問題：
+
+1. **repo 少了 9 個 mapper 檔**（182/183/185/187/188/189/191/193/194）。
+   `InfoNES_Mapper.cpp` include 了它們，但從未被 commit，**任何人 clone 都編不起來**。
+   已從作者本機工作區還原（兩邊共有檔案 byte 完全相同）。
+2. **`CMakeLists.txt:10` 的 `set(PICO_SDK_PATH ...)` 沒加 `CACHE`**，
+   會蓋掉 `-D` 與環境變數（分析文件 4.7）。已加上 `if(NOT DEFINED ...)` 保護。
+
+### 6.6 下一步
+
+Phase 3（磁碟控制器狀態機）尚未開始。接手點：
+
+- `Map20_Apu()` 的 `default` 分支——$4020–$4022、$4024、$4026
+- `Map20_ReadApu()` 的 `$4030`/`$4031`——目前回傳 `0x00`
+- `Map20_HSync()`——目前是空的，時序掛在這裡
+- `FDS_SetDiskImage()` 已把映像指標與面數存好，但 Phase 2 還沒有人讀它
+
+---
+
+*Phase 1、2 已實作完成；Phase 3 以後仍為計畫。*

@@ -5,9 +5,14 @@ cmake_minimum_required(VERSION 3.13)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-# Initialise pico_sdk from installed location
-# (note this can come from environment, CMake cache etc)
-set(PICO_SDK_PATH "../../../pico-sdk")
+# Initialise pico_sdk from installed location.
+# -DPICO_SDK_PATH=... on the command line and the PICO_SDK_PATH environment
+# variable both win; the relative path is only a last-resort default, for a
+# checkout that sits next to a pico-sdk clone. Do not turn this back into an
+# unconditional set() -- that silently overrides both.
+if(NOT DEFINED PICO_SDK_PATH AND NOT DEFINED ENV{PICO_SDK_PATH})
+    set(PICO_SDK_PATH "../../../pico-sdk")
+endif()
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
