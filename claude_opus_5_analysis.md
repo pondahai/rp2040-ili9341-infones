@@ -207,17 +207,72 @@ while (audioRing.readable_size() > TARGET_LATENCY_BYTES)  // main.cpp:639
 
 在那之前，這個「不匹配」是系統正常運作的一部分。
 
-### 4.2 Ring buffer 寫入端無溢位保護，且會永久阻塞 ⚠️ 高
+### 4.2 Ring buffer 寫入端無溢位保護，且會永久阻塞 ⚠️ 高（**暫不處理**，見文末決議）
 
-`AudioRingBuffer::write()`（`main.cpp:174-181`）只推進 `head`，
-完全不檢查 `writable_size()`。`InfoNES_GetSoundBufferSize()`（`main.cpp:616`）
-有導出可寫空間，但呼叫端沒有使用。
+這是兩個互相關聯的缺陷。
 
-目前靠 4.1 的延遲節流迴圈間接避免溢位，但那個迴圈是**沒有 timeout 的無限等待**：
-core1 一旦卡住（例如 DMA IRQ 沒觸發、mixer source 洩漏），
-core0 會永久停在 `InfoNES_SoundOutput` 裡，畫面直接凍結，只能斷電重開。
+**缺陷一：`write()` 不檢查剩餘空間**（`main.cpp:174-181`）
 
-建議：`write()` 依 `writable_size()` 截斷，節流迴圈加上最大等待時間。
+```cpp
+void write(const uint8_t* data, int len) {
+    uint32_t saved_irq = spin_lock_blocking(lock);
+    for(int i=0; i<len; ++i) {
+         buffer[head] = data[i];
+         head = (head + 1) % AUDIO_RING_BUFFER_SIZE;   // ← 只推 head，不看 tail
+    }
+    spin_unlock(lock, saved_irq);
+}
+```
+
+`head` 可以直接輾過 `tail`。一旦越過，`readable_size()` 的計算會從「快滿」瞬間變成
+「幾乎空」，8 KB 待播音訊蒸發、新舊資料播放順序顛倒，聽感上是一次爆音加一段跳針。
+
+防護所需的資訊其實已經具備：`writable_size()`（`main.cpp:155`）算得出剩餘空間，
+還透過 `InfoNES_GetSoundBufferSize()`（`main.cpp:616`）導出給 InfoNES 核心——
+但 `write()` 自己沒有呼叫它。
+
+**缺陷二：節流迴圈沒有逾時**（`main.cpp:639-642`）
+
+```cpp
+while (audioRing.readable_size() > TARGET_LATENCY_BYTES)
+{
+    sleep_us(100);
+}
+```
+
+平常這就是 4.1 所述的節流器，運作正常；但它沒有任何脫身條件。
+具體的死鎖路徑確實存在：core1 主迴圈（`main.cpp:876-880`）是
+
+```cpp
+while(audio_is_source_active(id)) { audio_mixer_step(); }
+```
+
+而 `audio_mixer_step()` 只有在 `audio_get_buffer()` 回傳非 NULL 時才推進
+`source->pos`（`audio.c:176`），這又取決於 `cur_audio_buffer` 在 DMA 中斷裡翻面
+（`audio.c:33-39`）。只要那個 DMA 中斷停了（DMA 鏈卡住、通道被誤搶、IRQ 被關閉），
+source 永遠 `active` → core1 出不來 → ring buffer 永遠不被讀取 →
+core0 永遠卡在 `sleep_us(100)`。
+
+結果是畫面、聲音、按鍵全部凍結。且遊戲執行期間**沒有啟用看門狗**——
+`watchdog_enable()` 全專案只出現一次（`menu.cpp:730`），那是用來觸發重開機的技巧，
+不是保護機制。因此只能斷電重開。
+
+**建議修法**（約十行，不改變正常路徑行為）：
+
+```cpp
+// 缺陷一：依剩餘空間截斷
+int w = writable_size();
+if (len > w) len = w;
+
+// 缺陷二：加上最大等待時間
+uint64_t deadline = time_us_64() + 50000;   // 50 ms
+while (audioRing.readable_size() > TARGET_LATENCY_BYTES && time_us_64() < deadline)
+{
+    sleep_us(100);
+}
+```
+
+節流照舊生效，只是在異常情況下退化成掉音訊，而不是整機當掉。
 
 ### 4.3 `audio_claim_unused_source()` 的競態 ⚠️ 中
 
@@ -340,3 +395,28 @@ endif()
 - **音訊 DMA 三通道鏈**，PWM 輸出完全零 CPU 介入
 
 這些都是在 264 KB SRAM、無硬體顯示控制器的條件下，把 NES 模擬硬擠進 RP2040 的合理取捨。
+
+---
+
+## 8. 決議紀錄
+
+### 2026-08-04：4.2 暫不處理
+
+**決定**：不修改，僅記錄待辦。
+
+**理由**：實機至今未觀察到凍結現象。4.2 描述的是一條**理論上存在但尚未被觸發**的
+死鎖路徑——它需要 DMA 中斷先停止運作才會發生，而目前沒有證據顯示那件事發生過。
+在沒有實際症狀的情況下改動音訊路徑，反而可能擾動已經手工調校穩定的節流平衡
+（見 4.1 的取樣率調校史）。
+
+**觸發條件**：若日後出現以下任一症狀，應立即回頭實作 4.2 的修法：
+
+- 遊玩中畫面與聲音同時凍結、按鍵無反應，且需斷電才能恢復
+- 音訊出現規律性的爆音後跳針（缺陷一的溢位特徵）
+- 更換 LCD、調整 SPI 時脈或改動 DMA 通道配置之後（這些都可能改變 DMA 中斷的時序）
+
+**備註**：修法本身已在 4.2 節寫好，約十行，屆時可直接套用。
+
+---
+
+*本文件為程式碼分析紀錄，不含任何實際程式碼改動。*
