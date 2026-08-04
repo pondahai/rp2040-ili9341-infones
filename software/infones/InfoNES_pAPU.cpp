@@ -12,8 +12,10 @@
 #include "K6502.h"
 #include "K6502_rw.h"
 #include "InfoNES_System.h"
+#include "InfoNES.h"
 #include "InfoNES_pAPU.h"
 #include <algorithm>
+#include <stdio.h>
 #include <string.h>
 
 /*-------------------------------------------------------------------*/
@@ -23,6 +25,55 @@
 struct ApuEvent_t ApuEventQueue[APU_EVENT_MAX];
 int cur_event;
 WORD entertime;
+
+/*-------------------------------------------------------------------*/
+/*   Pulse #1 register capture                                       */
+/*-------------------------------------------------------------------*/
+/* Arms on a rising edge of the A button and records every write to
+   $4000-$4003 for the next APU_CAP_FRAMES frames, then dumps it. That
+   window covers a jump sfx from its trigger to its tail, so the same
+   button press in two games produces directly comparable traces.
+   Set to 0 to remove entirely. */
+#define APU_CAP_DEBUG 0
+
+#if APU_CAP_DEBUG
+#define APU_CAP_MAX 160
+#define APU_CAP_FRAMES 24
+#define APU_CAP_COOLDOWN 30 /* frames after a dump before re-arming */
+
+struct ApuCap_t
+{
+  BYTE frame;
+  BYTE reg;
+  BYTE data;
+};
+
+static ApuCap_t ApuCapBuf[APU_CAP_MAX];
+static int ApuCapCount;
+static int ApuCapFramesLeft; /* >0 while capturing */
+static int ApuCapCooldown;
+static BYTE ApuCapFrame;
+static bool ApuCapPrevA;
+static bool ApuCapHave;    /* a completed trace is held in the buffer */
+static int ApuCapSerial;   /* increments per completed capture */
+static int ApuCapRepeat;   /* frames until the trace is printed again */
+static int ApuCapHeartbeat;
+
+/* Called from the $4000-$4003 write functions. Types APUET_W_C1A..C1D
+   are 0x00..0x03, so the type doubles as the register index. */
+static inline void ApuCapWrite(BYTE type, BYTE value)
+{
+  if (ApuCapFramesLeft > 0 && type <= APUET_W_C1D && ApuCapCount < APU_CAP_MAX)
+  {
+    ApuCapBuf[ApuCapCount].frame = ApuCapFrame;
+    ApuCapBuf[ApuCapCount].reg = type;
+    ApuCapBuf[ApuCapCount].data = value;
+    ApuCapCount++;
+  }
+}
+#else
+#define ApuCapWrite(type, value) ((void)0)
+#endif
 
 /*-------------------------------------------------------------------*/
 /*   APU Register Write Functions                                    */
@@ -35,6 +86,7 @@ WORD entertime;
     ApuEventQueue[cur_event].type = APUET_W_##evtype;              \
     ApuEventQueue[cur_event].data = value;                         \
     cur_event++;                                                   \
+    ApuCapWrite(APUET_W_##evtype, value);                          \
   }
 
 // 普通にバグってる
@@ -98,6 +150,24 @@ BYTE wave_buffers[5][735]; /* 44100 / 60 = 735 samples per sync */
 
 BYTE ApuCtrl;
 BYTE ApuCtrlNew;
+
+/*-------------------------------------------------------------------*/
+/*   Sweep instrumentation                                           */
+/*-------------------------------------------------------------------*/
+/* Counts how often the sweep unit wanted to drive a pulse channel
+   outside the legal period range. On hardware those updates are
+   suppressed; before the guard below existed they wrapped ApuC?Freq
+   (a DWORD) around and left the channel audible at a garbage period.
+   Set to 0 once the pulse channels are known good. */
+#define APU_SWEEP_DEBUG 0
+
+#if APU_SWEEP_DEBUG
+DWORD ApuDbgSweepBlockC1;
+DWORD ApuDbgSweepBlockC2;
+static WORD ApuDbgTick;
+#define APU_SWEEP_DEBUG_PERIOD 60 /* vsyncs between reports */
+#endif
+
 
 /*-------------------------------------------------------------------*/
 /*   APU Quality resources                                           */
@@ -455,6 +525,18 @@ DWORD __not_in_flash_func(ApuDpcmCycles)[16] =
         428, 380, 340, 320, 286, 254, 226, 214,
         190, 160, 142, 128, 106, 85, 72, 54};
 
+/*-------------------------------------------------------------------*/
+/* Phase increment for a pulse channel at the given period            */
+/*-------------------------------------------------------------------*/
+/* The period is halved before dividing, so a period of 0 or 1 gives a
+   zero divisor. The RP2040 hardware divider does not fault on that --
+   it returns a garbage quotient -- so the case has to be caught here. */
+static inline DWORD ApuPulseSkip(DWORD freq)
+{
+  DWORD half = freq >> 1;
+  return half ? (ApuPulseMagic / half) : 0;
+}
+
 /*===================================================================*/
 /*                                                                   */
 /*      ApuRenderingWave1() : Rendering Rectangular Wave #1          */
@@ -487,31 +569,14 @@ int __not_in_flash_func(ApuWriteWave1)(int cycles, int event)
         ApuC1c = ApuEventQueue[event].data;
         ApuC1Freq = ((((WORD)ApuC1d & 0x07) << 8) + ApuC1c);
         ApuC1Atl = ApuAtl[(ApuC1d & 0xf8) >> 3];
-
-        if (ApuC1Freq)
-        {
-          ApuC1Skip = ApuPulseMagic / (ApuC1Freq / 2);
-        }
-        else
-        {
-          ApuC1Skip = 0;
-        }
+        ApuC1Skip = ApuPulseSkip(ApuC1Freq);
         break;
 
       case 3:
         ApuC1d = ApuEventQueue[event].data;
         ApuC1Freq = ((((WORD)ApuC1d & 0x07) << 8) + ApuC1c);
         ApuC1Atl = ApuAtl[(ApuC1d & 0xf8) >> 3];
-
-        if (ApuC1Freq)
-        {
-          ApuC1Skip = ApuPulseMagic / (ApuC1Freq / 2);
-        }
-        else
-        {
-          ApuC1Skip = 0;
-        }
-
+        ApuC1Skip = ApuPulseSkip(ApuC1Freq);
         ApuC1EnvVol = 15;
         break;
       }
@@ -553,7 +618,7 @@ void __not_in_flash_func(ApuRenderingWave1)(int n)
   }
   else
   {
-    memset(wave_buffers[0], 0, 2 * n);
+    memset(wave_buffers[0], 0, n);
   }
 }
 
@@ -589,30 +654,14 @@ int __not_in_flash_func(ApuWriteWave2)(int cycles, int event)
         ApuC2c = ApuEventQueue[event].data;
         ApuC2Freq = ((((WORD)ApuC2d & 0x07) << 8) + ApuC2c);
         ApuC2Atl = ApuAtl[(ApuC2d & 0xf8) >> 3];
-
-        if (ApuC2Freq)
-        {
-          ApuC2Skip = ApuPulseMagic / (ApuC2Freq / 2);
-        }
-        else
-        {
-          ApuC2Skip = 0;
-        }
+        ApuC2Skip = ApuPulseSkip(ApuC2Freq);
         break;
 
       case 3:
         ApuC2d = ApuEventQueue[event].data;
         ApuC2Freq = ((((WORD)ApuC2d & 0x07) << 8) + ApuC2c);
         ApuC2Atl = ApuAtl[(ApuC2d & 0xf8) >> 3];
-
-        if (ApuC2Freq)
-        {
-          ApuC2Skip = ApuPulseMagic / (ApuC2Freq / 2);
-        }
-        else
-        {
-          ApuC2Skip = 0;
-        }
+        ApuC2Skip = ApuPulseSkip(ApuC2Freq);
         ApuC2EnvVol = 15;
         break;
       }
@@ -654,7 +703,7 @@ void __not_in_flash_func(ApuRenderingWave2)(int n)
   }
   else
   {
-    memset(wave_buffers[1], 0, 2 * n);
+    memset(wave_buffers[1], 0, n);
   }
 }
 
@@ -747,7 +796,7 @@ void __not_in_flash_func(ApuRenderingWave3)(int n)
   }
   else
   {
-    memset(wave_buffers[2], 0, 2 * n);
+    memset(wave_buffers[2], 0, n);
   }
 }
 
@@ -875,7 +924,7 @@ void __not_in_flash_func(ApuRenderingWave4)(int n)
   }
   else
   {
-    memset(wave_buffers[3], 0, n << 1);
+    memset(wave_buffers[3], 0, n);
   }
 }
 
@@ -1002,7 +1051,7 @@ void __not_in_flash_func(ApuRenderingWave5)(int n)
   }
   else
   {
-    memset(wave_buffers[4], 0, n << 1);
+    memset(wave_buffers[4], 0, n);
   }
 }
 
@@ -1043,18 +1092,29 @@ void InfoNES_pAPUVsync()
     {
       ApuC1SweepPhase += ApuC1SweepDelay;
 
-      if (ApuC1SweepIncDec) /* ramp up */
+      /* Rectangular #1 negates with the ones' complement, so a ramp up
+         subtracts one more than the shifted value. Computed signed:
+         the target can go negative, and ApuC1Freq is a DWORD. */
+      int32_t delta = (int32_t)(ApuC1Freq >> ApuC1SweepShifts);
+      int32_t target = ApuC1SweepIncDec ? (int32_t)ApuC1Freq - delta - 1
+                                        : (int32_t)ApuC1Freq + delta;
+
+      /* Hardware mutes the channel, and crucially does NOT write the
+         period back, once the current period is below 8 or the target
+         would exceed 11 bits. Without this the ramp up walks the period
+         down past zero, wraps the DWORD to a huge value, and defeats the
+         "ApuC1Freq < 8" mute test in ApuRenderingWave1() -- the channel
+         then stays audible with a frozen phase increment. */
+      if (ApuC1Freq < 8 || target > 0x7FF)
       {
-        /* Rectangular #1 */
-        ApuC1Freq += ~(ApuC1Freq >> ApuC1SweepShifts);
-      }
-      else
-      {
-        /* ramp down */
-        ApuC1Freq += (ApuC1Freq >> ApuC1SweepShifts);
+#if APU_SWEEP_DEBUG
+        ApuDbgSweepBlockC1++;
+#endif
+        continue; /* divider keeps running, period stays put */
       }
 
-      ApuC1Skip = ApuPulseMagic / (ApuC1Freq / 2);
+      ApuC1Freq = (DWORD)target;
+      ApuC1Skip = ApuPulseSkip(ApuC1Freq);
     }
   }
 
@@ -1088,17 +1148,23 @@ void InfoNES_pAPUVsync()
     {
       ApuC2SweepPhase += ApuC2SweepDelay;
 
-      if (ApuC2SweepIncDec) /* ramp up */
+      /* Rectangular #2 negates with the twos' complement -- the one-off
+         difference from #1 is real hardware behaviour, not a typo. */
+      int32_t delta = (int32_t)(ApuC2Freq >> ApuC2SweepShifts);
+      int32_t target = ApuC2SweepIncDec ? (int32_t)ApuC2Freq - delta
+                                        : (int32_t)ApuC2Freq + delta;
+
+      /* Same muting rule as #1: no write-back out of range. */
+      if (ApuC2Freq < 8 || target > 0x7FF)
       {
-        /* Rectangular #2 */
-        ApuC2Freq -= (ApuC2Freq >> ApuC2SweepShifts);
+#if APU_SWEEP_DEBUG
+        ApuDbgSweepBlockC2++;
+#endif
+        continue; /* divider keeps running, period stays put */
       }
-      else
-      {
-        /* ramp down */
-        ApuC2Freq += (ApuC2Freq >> ApuC2SweepShifts);
-      }
-      ApuC2Skip = ApuPulseMagic / (ApuC2Freq / 2);
+
+      ApuC2Freq = (DWORD)target;
+      ApuC2Skip = ApuPulseSkip(ApuC2Freq);
     }
   }
 
@@ -1149,6 +1215,97 @@ void InfoNES_pAPUVsync()
   // printf("C5: %02x %02x %02x %02x, lp%d, v%02x, %04x, %d\n",
   //        ApuC5Reg[0], ApuC5Reg[1], ApuC5Reg[2], ApuC5Reg[3],
   //        ApuC5Looping, ApuC5DpcmValue, ApuC5Address, ApuC5DmaLength);
+
+#if APU_SWEEP_DEBUG
+  /* Reported here rather than in a mapper so that it also covers .nes
+     games. A jump in SMB2 should show blkC1 counting; SMB1 is the
+     control and should stay at 0. */
+  if (++ApuDbgTick >= APU_SWEEP_DEBUG_PERIOD)
+  {
+    ApuDbgTick = 0;
+    if (ApuDbgSweepBlockC1 || ApuDbgSweepBlockC2)
+    {
+      InfoNES_MessageBox("APU sweep blocked: blkC1=%d blkC2=%d",
+                         ApuDbgSweepBlockC1, ApuDbgSweepBlockC2);
+    }
+    ApuDbgSweepBlockC1 = 0;
+    ApuDbgSweepBlockC2 = 0;
+  }
+#endif
+
+#if APU_CAP_DEBUG
+  {
+    bool bA = (PAD1_Latch & 1) != 0; /* bit0 = A */
+
+    /* Heartbeat: proves the emulation loop and the serial link are both
+       alive even when nothing else has anything to say. */
+    if (++ApuCapHeartbeat >= 60)
+    {
+      ApuCapHeartbeat = 0;
+      InfoNES_MessageBox("HB cap=%d have=%d", ApuCapSerial, ApuCapHave ? 1 : 0);
+    }
+
+    if (ApuCapFramesLeft > 0)
+    {
+      ApuCapFrame++;
+      if (--ApuCapFramesLeft == 0)
+      {
+        ApuCapHave = true;
+        ApuCapSerial++;
+        ApuCapRepeat = 0; /* print it immediately, then keep repeating */
+        ApuCapCooldown = APU_CAP_COOLDOWN;
+      }
+    }
+    else if (ApuCapCooldown > 0)
+    {
+      ApuCapCooldown--;
+    }
+    else if (bA && !ApuCapPrevA) /* rising edge of A */
+    {
+      ApuCapCount = 0;
+      ApuCapFrame = 0;
+      ApuCapFramesLeft = APU_CAP_FRAMES;
+    }
+
+    ApuCapPrevA = bA;
+
+    /* Reprint the held trace every few seconds. The serial link is only
+       readable while a host has DTR asserted, and there is no way to
+       know from here when that starts -- repeating removes the need to
+       catch the one moment the button was pressed. */
+    if (ApuCapHave && --ApuCapRepeat <= 0)
+    {
+      ApuCapRepeat = 180; /* ~3 s */
+      InfoNES_MessageBox("CAP begin #%d n=%d%s", ApuCapSerial, ApuCapCount,
+                         ApuCapCount >= APU_CAP_MAX ? " (TRUNCATED)" : "");
+      /* One line per frame keeps each print short and makes the two
+         games line up row by row when diffed. */
+      for (int f = 0; f < APU_CAP_FRAMES; f++)
+      {
+        char line[96];
+        int len = 0;
+        for (int i = 0; i < ApuCapCount; i++)
+        {
+          if (ApuCapBuf[i].frame != f)
+          {
+            continue;
+          }
+          if (len > (int)sizeof(line) - 12)
+          {
+            break;
+          }
+          len += snprintf(line + len, sizeof(line) - len, " %d=%02x",
+                          ApuCapBuf[i].reg, ApuCapBuf[i].data);
+        }
+        if (len)
+        {
+          InfoNES_MessageBox("CAP f%02d%s", f, line);
+        }
+      }
+      InfoNES_MessageBox("CAP end");
+    }
+  }
+#endif
 }
 
 /*===================================================================*/

@@ -360,6 +360,19 @@ static inline void __not_in_flash_func(K6502_Write)(WORD wAddr, BYTE byData)
     break;
 
   case 0x4000: /* Sound */
+    /* Only $4000-$4017 belong to the 2A03. Everything above that in this
+       page is cartridge space -- the FDS puts its disk and timer
+       registers at $4020-$4092, and several pirate mappers decode $4020
+       too. Masking those with 0x1f folded them straight back onto the
+       APU: a write to $4020 landed on $4000, $4021 on $4001, and so on,
+       so an FDS game reprogramming its interval timer every frame was
+       also rewriting pulse channel 1 every frame. */
+    if (wAddr > 0x4017)
+    {
+      MapperApu(wAddr, byData);
+      break;
+    }
+
     switch (wAddr & 0x1f)
     {
     case 0x00:
@@ -451,16 +464,8 @@ static inline void __not_in_flash_func(K6502_Write)(WORD wAddr, BYTE byData)
       break;
     }
 
-    if (wAddr <= 0x4017)
-    {
-      /* Write to APU Register */
-      APU_Reg[wAddr & 0x1f] = byData;
-    }
-    else
-    {
-      /* Write to APU */
-      MapperApu(wAddr, byData);
-    }
+    /* Write to APU Register */
+    APU_Reg[wAddr & 0x1f] = byData;
     break;
 
   case 0x6000: /* SRAM */
