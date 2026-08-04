@@ -175,8 +175,10 @@ static int FDS_WriteEntry = -1;
 
 /* Temporary instrumentation: reports once a second over the USB serial so
    the IRQ rates can be compared against what the game should be seeing.
-   Set to 0 once the scrolling and audio behaviour is understood. */
-#define FDS_DEBUG_COUNTERS 1
+   Off now that both the audio and the scrolling behave -- see fds_plan.md
+   7.10 for what is still unverified about why the scrolling recovered.
+   The render/tempY/addrY fields are the ones to turn back on for that. */
+#define FDS_DEBUG_COUNTERS 0
 
 #if FDS_DEBUG_COUNTERS
 #define FDS_DEBUG_PERIOD (262 * 60) /* scanlines in about one second */
