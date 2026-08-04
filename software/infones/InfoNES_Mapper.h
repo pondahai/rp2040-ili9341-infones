@@ -153,6 +153,7 @@ void Map20_RenderScreen(BYTE byMode);
 
 /* Famicom Disk System loader interface (see mapper/InfoNES_Mapper_020.cpp) */
 #define FDS_BIOS_SIZE 0x2000
+#define FDS_SIDE_SIZE 65500 /* one side of a .fds image, header excluded */
 BYTE *FDS_GetBiosBuffer(void);
 void FDS_SetBiosPresent(bool bPresent);
 bool FDS_IsBiosPresent(void);
