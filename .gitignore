@@ -7,3 +7,11 @@ disksys.rom
 # Disk images and cartridge ROMs
 *.fds
 *.nes
+
+# Build output
+build/
+build_*/
+
+# Local junction to the Pico SDK, to satisfy the hardcoded
+# PICO_SDK_PATH "../../../pico-sdk" in software/infones/CMakeLists.txt
+/pico-sdk
