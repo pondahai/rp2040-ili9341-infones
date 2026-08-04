@@ -1,0 +1,9 @@
+# Copyrighted material — never commit.
+# The Famicom Disk System BIOS (disksys.rom) is Nintendo code; it belongs on
+# the SD card root at runtime. A local copy here is fine for convenience.
+disksys.rom
+*.rom
+
+# Disk images and cartridge ROMs
+*.fds
+*.nes

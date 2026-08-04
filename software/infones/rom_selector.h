@@ -11,8 +11,21 @@ inline bool checkNESMagic(const uint8_t *data)
     return memcmp(data, "NES\x1a", 4) == 0;
 }
 
+// fwNES header: "FDS\x1a", side count, then 11 reserved bytes,
+// followed by <side count> sides of 65500 bytes each.
+inline bool checkFDSMagic(const uint8_t *data)
+{
+    return memcmp(data, "FDS\x1a", 4) == 0;
+}
+
 inline bool hasNVRAM(const uint8_t *data)
 {
+    if (checkFDSMagic(data))
+    {
+        // Disk writes are Phase 5; until then an FDS image gets no
+        // NVRAM slot, so nothing is loaded into SRAM at startup.
+        return false;
+    }
     auto info1 = data[6];
     return info1 & 2;
 }
@@ -32,6 +45,14 @@ public:
         {
             singleROM_ = p;
             printf("Single ROM.\n");
+            return;
+        }
+
+        if (checkFDSMagic(p))
+        {
+            // An .fds image is always burned on its own, never in a TAR.
+            singleROM_ = p;
+            printf("Single FDS disk image, %d side(s).\n", p[4]);
             return;
         }
 

@@ -141,6 +141,23 @@ void Map19_Apu(WORD wAddr, BYTE byData);
 BYTE Map19_ReadApu(WORD wAddr);
 void Map19_HSync();
 
+void Map20_Init();
+void Map20_Write(WORD wAddr, BYTE byData);
+void Map20_Sram(WORD wAddr, BYTE byData);
+void Map20_Apu(WORD wAddr, BYTE byData);
+BYTE Map20_ReadApu(WORD wAddr);
+void Map20_VSync();
+void Map20_HSync();
+void Map20_PPU(WORD wAddr);
+void Map20_RenderScreen(BYTE byMode);
+
+/* Famicom Disk System loader interface (see mapper/InfoNES_Mapper_020.cpp) */
+#define FDS_BIOS_SIZE 0x2000
+BYTE *FDS_GetBiosBuffer(void);
+void FDS_SetBiosPresent(bool bPresent);
+bool FDS_IsBiosPresent(void);
+void FDS_SetDiskImage(const BYTE *pImage, int nSides);
+
 void Map21_Init();
 void Map21_Write(WORD wAddr, BYTE byData);
 void Map21_HSync();
