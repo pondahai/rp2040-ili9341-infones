@@ -175,6 +175,66 @@ An FDS BIOS is required: put `disksys.rom` in the SD card root.
 
 ---
 
+## 開發歷程 / Development history
+
+### 2023：從「畫得出來」到「跑得動」
+
+專案從一台為 MakeCode Arcade 設計的 RP2040 掌機出發，改造成能跑 NES。
+第一階段的全部工夫都花在**把畫面塞進超頻 SPI 的頻寬裡**。
+
+| 日期 | 里程碑 |
+|---|---|
+| 2023-04-10 | 初版上板，硬體以 submodule 加入。逐線繪製，**三幀只畫一幀**（`frame_skip`）換取速度 |
+| 2023-04-12 | 音訊搭上同一節拍，每三幀送一次 |
+| 2023-04-13 | 顯示改走 SPI + DMA，但仍需等 DMA 結束才繼續模擬，沒省到 CPU |
+| 2023-04-14 | 加入 SD 卡、ST7789 支援與 ROM 選單 |
+| **2023-04-18** | **`speed up to 53 FPS`**：DMA 改為非同步（寫進 outgoing 緩衝後不等待），SPI 傳輸終於和下一條掃描線的 PPU 運算重疊。吞吐量足夠之後，**跳幀被直接註解掉** |
+| 2023-04-19 ~ 05 | 調色盤修正、隱藏檔過濾、SD 卡失敗時退回直接執行 flash 內的 ROM |
+
+跳幀的來龍去脈（含當時的 diff）記在
+[`claude_opus_5_analysis.md` §3.1](../../claude_opus_5_analysis.md)。
+現在程式裡殘留的 `frame_skip_counter` 是歷史遺跡，不是壞掉的功能。
+
+### 2024：聲音
+
+畫面穩定之後，重心轉到音訊：pAPU 輸出、`font_8x8` 選單字型、
+core1 的音訊節拍與 `SoundOutputBuilding` 旗標。
+這一年的 commit 幾乎都落在 `main.cpp` 與 `InfoNES_pAPU.cpp`。
+
+### 2026-01：音訊改用 ring buffer
+
+以 `TARGET_LATENCY_BYTES` 為目標的 ring buffer 節流取代舊的每三幀送音，
+跳幀計數器的**最後一個使用者也隨之消失**。
+副作用是音訊取樣率（22050 Hz）實質上變成了整台機器的速度節流器——
+這是刻意的設計，不是 bug，詳見分析文件 §4.1。
+
+### 2026-08：技術分析與 FDS 模擬
+
+| 階段 | 內容 |
+|---|---|
+| 分析 | 建立 [`claude_opus_5_analysis.md`](../../claude_opus_5_analysis.md)：架構、頻寬實測數字、問題清單與修復優先順序 |
+| 計畫 | 建立 [`fds_plan.md`](../../fds_plan.md)：FDS（mapper 20）分 6 階段的實作計畫與風險評估 |
+| Phase 1–2 | 載入路徑與記憶體映射。原估需多 24 KB RAM，**實測只多 4 bytes** |
+| Phase 3–4 | 磁碟控制器狀態機與資料流，兩階段一併完成 |
+| Phase 5 | 換面與存檔。沿用既有 flash NVRAM，**不需要擴充 slot**；存檔以磁片為 key，並接受無 header 的 `.fds` |
+| 除錯 | 修掉 `$40xx` 位址解碼把匣帶暫存器折回 APU 的老 bug（§7.8），順帶修 sweep 靜音保護、`Freq==1` 除零、靜音路徑 `memset` 越界三個既有 APU 缺陷（§7.9） |
+| 建置 | 重寫本文件，讓一份乾淨的 clone 真的能編得起來；補上 Windows 的免按鈕燒錄與 Pico Developer Command Prompt 作法 |
+
+Phase 1–5 已實機驗證，**Phase 6（FDS 擴充音源）仍是計畫**。
+`$40xx` 修好之後，《アルマナの奇跡》的背景垂直漂移與磁碟動作期間的嗶聲
+也一併消失，但**只有音效那條有實證機制**，視訊症狀為何跟著好目前沒有
+驗證過的解釋（見 `fds_plan.md` §7.10）。
+
+### 一個值得記下來的方法論
+
+跳躍音效走音那題連錯兩次，都是建立在「它一定走方波 1 + sweep」這個
+**從未驗證過的前提**上。真正解題的是放棄推理、改成量測——攔截按下 A 鍵後
+24 幀內所有寫進 `$4000-$4003` 的原始值，答案第一眼就看出來了：
+重複出現的 `0x1658 = 5720` 正是文件裡早就記過的 FDS 計時器 latch 值。
+**線索一直在文件裡，只是沒去對。**
+
+---
+
 ## 文件 / Documentation
 
 - [`fds_plan.md`](../../fds_plan.md) — FDS 模擬的實作計畫、實測結果與已知限制
