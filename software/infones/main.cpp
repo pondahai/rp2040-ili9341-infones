@@ -593,7 +593,11 @@ void InfoNES_PadState(DWORD *pdwPad1, DWORD *pdwPad2, DWORD *pdwSystem)
             }
         }
 
-        prevButtons[i] = *pdwPad1;
+        // Has to be the raw read, not what went out to the pad: the value
+        // in *pdwPad1 already had the rapid fire mask applied, so every 8th
+        // frame it dropped the held button and the next frame saw a fresh
+        // press. Holding Select+A then re-toggled the mask over and over.
+        prevButtons[i] = v;
     }
     *pdwSystem = reset ? PAD_SYS_QUIT : 0;
 }
