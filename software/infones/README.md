@@ -28,12 +28,7 @@ burned into flash, and run from there.
 
 ## 編譯 / Build
 
-在開始編譯之前，請務必先初始化並更新子模組：
-
 ```bash
-# 在專案根目錄執行
-git submodule update --init --recursive
-
 cd software/infones
 mkdir build && cd build
 
