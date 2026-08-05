@@ -18,16 +18,17 @@
 // #include "nespad.h"
 // #include "wiipad.h"
 
-#include "font_8x8.h"
-#define FONT_CHAR_WIDTH 8
-#define FONT_CHAR_HEIGHT 8
-#define FONT_N_CHARS 95
-#define FONT_FIRST_ASCII 32
+#include "font_cjk.h"
+#define FONT_CHAR_WIDTH CJK_CELL_WIDTH
+#define FONT_CHAR_HEIGHT CJK_CELL_HEIGHT
+#define FONT_FIRST_ASCII ASCII_FIRST
 #define SCREEN_COLS 32
-#define SCREEN_ROWS 29
+// A cell is 16 px tall now that CJK glyphs have to fit, so the 232 scanlines
+// the menu is given hold 14 rows instead of the 29 the 8x8 font managed.
+#define SCREEN_ROWS 14
 
 #define STARTROW 2
-#define ENDROW 25
+#define ENDROW 11
 #define PAGESIZE (ENDROW - STARTROW + 1)
 
 #define VISIBLEPATHSIZE (SCREEN_COLS - 3)
@@ -48,15 +49,33 @@ extern const WORD __not_in_flash_func(NesPalette)[];
 static int fgcolor = DEFAULT_FGCOLOR;
 static int bgcolor = DEFAULT_BGCOLOR;
 
+// A cell holds a glyph index, not a character. Resolving a codepoint to a glyph
+// costs a binary search, and the rasteriser below runs 32 cells x 232 scanlines
+// every frame -- far too hot to search in. putText() does the lookup once, when
+// the text changes, and stores the result here.
+enum cellKind : uint8_t
+{
+    CELL_ASCII,      // glyph indexes ascii_bitmap, one cell wide
+    CELL_WIDE_LEAD,  // glyph indexes cjk_bitmap; left half of a two-cell glyph
+    CELL_WIDE_TRAIL, // right half, carrying the same glyph index
+    CELL_TOFU_LEAD,  // codepoint the font has no glyph for; drawn as a box
+    CELL_TOFU_TRAIL,
+};
+
 struct charCell
 {
     uint8_t fgcolor : 4;
     uint8_t bgcolor : 4;
-    char charvalue;
+    uint8_t kind;
+    uint16_t glyph;
 };
 
 #define SCREENBUFCELLS SCREEN_ROWS *SCREEN_COLS
 static charCell *screenBuffer;
+// The buffer is borrowed from the emulator's SRAM array; make sure the wider
+// cell still fits before someone discovers it at runtime.
+static_assert(SCREENBUFCELLS * sizeof(charCell) <= SRAM_SIZE,
+              "screen buffer no longer fits in the borrowed emulator SRAM");
 
 // Whether the FDS BIOS is on the SD card. Checked once when the menu starts;
 // without it .fds images cannot be run, so the menu says so and refuses to
@@ -97,6 +116,119 @@ static WORD *WorkLineRom = nullptr;
 void RomSelect_SetLineBuffer(WORD *p, WORD size)
 {
     WorkLineRom = p;
+}
+
+// Decode one UTF-8 sequence, returning the bytes consumed (0 at end of string).
+// FatFs hands us UTF-8 now (FF_LFN_UNICODE 2), and a filename is whatever the
+// card happens to contain, so malformed input must not desynchronise the rest
+// of the line: anything invalid consumes a single byte and reports U+FFFD.
+static int decodeUtf8(const char *s, uint32_t *cp)
+{
+    const uint8_t *p = (const uint8_t *)s;
+    if (p[0] == 0)
+    {
+        return 0;
+    }
+    if (p[0] < 0x80)
+    {
+        *cp = p[0];
+        return 1;
+    }
+    if ((p[0] & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80)
+    {
+        *cp = ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+        if (*cp >= 0x80)
+        {
+            return 2;
+        }
+    }
+    else if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80)
+    {
+        *cp = ((uint32_t)(p[0] & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+        if (*cp >= 0x800)
+        {
+            return 3;
+        }
+    }
+    else if ((p[0] & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 &&
+             (p[3] & 0xC0) == 0x80)
+    {
+        // Above the BMP. The glyph index is 16 bit, so these can only ever be
+        // tofu; report a codepoint no lookup will match and skip all four bytes.
+        *cp = 0xFFFF;
+        return 4;
+    }
+    *cp = 0xFFFD;
+    return 1;
+}
+
+static inline bool isHalfWidth(uint32_t cp)
+{
+    return cp >= ASCII_FIRST && cp < ASCII_FIRST + ASCII_COUNT;
+}
+
+// Binary search of the sorted codepoint table. Only ever called from putText().
+static int findWideGlyph(uint32_t cp)
+{
+    if (cp > 0xFFFF)
+    {
+        return -1;
+    }
+    int lo = 0;
+    int hi = CJK_GLYPH_COUNT - 1;
+    while (lo <= hi)
+    {
+        int mid = (lo + hi) / 2;
+        uint16_t probe = cjk_index[mid];
+        if (probe == cp)
+        {
+            return mid;
+        }
+        if (probe < cp)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
+// Width in cells rather than bytes: a CJK character takes two.
+static int displayWidth(const char *s)
+{
+    uint32_t cp;
+    int len;
+    int width = 0;
+    while ((len = decodeUtf8(s, &cp)) > 0)
+    {
+        width += isHalfWidth(cp) ? 1 : 2;
+        s += len;
+    }
+    return width;
+}
+
+// Step over one whole sequence. Scrolling a byte at a time would cut a
+// multi-byte character in half and render the tail as tofu.
+static int utf8Advance(const char *s)
+{
+    uint32_t cp;
+    int len = decodeUtf8(s, &cp);
+    return len > 0 ? len : 1;
+}
+
+// Codepoints the font has no glyph for draw as a hollow box, so that a missing
+// character reads as missing instead of as a space.
+static unsigned tofuSlice(bool lead, int glyphRow)
+{
+    if (glyphRow < 1 || glyphRow > 11)
+    {
+        return 0;
+    }
+    unsigned bits = (glyphRow == 1 || glyphRow == 11) ? 0x1ffe : 0x1002;
+    return lead ? (bits & 0xff) : (bits >> 8);
 }
 
 // static constexpr int LEFT = 1 << 6;
@@ -175,44 +307,65 @@ void RomSelect_PadState(DWORD *pdwPad1, bool ignorepushed = false)
 }
 void RomSelect_DrawLine(int line, int selectedRow)
 {
-    WORD fgcolor, bgcolor;
     memset(WorkLineRom, 0, 640);
-   
+
+    int row = line / FONT_CHAR_HEIGHT;
+    if (row >= SCREEN_ROWS)
+    {
+        // 14 rows of 16 px cover 224 of the 232 scanlines the menu is handed.
+        // Fill the remainder with the background rather than leaving it black.
+        WORD bgcolor = NesPalette[screenBuffer[0].bgcolor];
+        for (auto i = 0; i < SCREEN_COLS * FONT_CHAR_WIDTH; ++i)
+        {
+            WorkLineRom[i] = bgcolor;
+        }
+        return;
+    }
+    int glyphRow = line % FONT_CHAR_HEIGHT - CJK_GLYPH_YSHIFT;
+
     for (auto i = 0; i < SCREEN_COLS; ++i)
     {
-        int charIndex = i + line / FONT_CHAR_HEIGHT * SCREEN_COLS;
-        int row = charIndex / SCREEN_COLS;
-        uint c = screenBuffer[charIndex].charvalue;
+        const charCell &cell = screenBuffer[row * SCREEN_COLS + i];
+        WORD fgcolor, bgcolor;
         if (row == selectedRow)
         {
-            fgcolor = NesPalette[screenBuffer[charIndex].bgcolor];
-            bgcolor = NesPalette[screenBuffer[charIndex].fgcolor];
+            fgcolor = NesPalette[cell.bgcolor];
+            bgcolor = NesPalette[cell.fgcolor];
         }
         else
         {
-            fgcolor = NesPalette[screenBuffer[charIndex].fgcolor];
-            bgcolor = NesPalette[screenBuffer[charIndex].bgcolor];
+            fgcolor = NesPalette[cell.fgcolor];
+            bgcolor = NesPalette[cell.bgcolor];
         }
 
-        int rowInChar = line % FONT_CHAR_HEIGHT;
-        char fontSlice = font_8x8[(c - FONT_FIRST_ASCII) + (rowInChar)*FONT_N_CHARS];
-        // dahai
-        // static char even_row;
-          // if(rowInChar%2 == 0) even_row = fontSlice;
-        // if(rowInChar > 0 ){
-          // if(rowInChar%2 == 1) fontSlice = even_row;
-        // }
-        //
-        for (auto bit = 0; bit < 8; bit++)
+        // Both glyph tables are fixed stride with the y_offset already baked in,
+        // so selecting a row is arithmetic: no per-glyph metrics, no search.
+        unsigned fontSlice = 0;
+        switch (cell.kind)
         {
-            if (fontSlice & 1)
+        case CELL_ASCII:
+            if (glyphRow >= 0 && glyphRow < ASCII_GLYPH_ROWS)
             {
-                *WorkLineRom = fgcolor;
+                fontSlice = ascii_bitmap[cell.glyph * ASCII_GLYPH_ROWS + glyphRow];
             }
-            else
+            break;
+        case CELL_WIDE_LEAD:
+        case CELL_WIDE_TRAIL:
+            if (glyphRow >= 0 && glyphRow < CJK_GLYPH_ROWS)
             {
-                *WorkLineRom = bgcolor;
+                unsigned bits = cjk_bitmap[cell.glyph * CJK_GLYPH_ROWS + glyphRow];
+                fontSlice = (cell.kind == CELL_WIDE_LEAD) ? (bits & 0xff) : (bits >> 8);
             }
+            break;
+        case CELL_TOFU_LEAD:
+        case CELL_TOFU_TRAIL:
+            fontSlice = tofuSlice(cell.kind == CELL_TOFU_LEAD, glyphRow);
+            break;
+        }
+
+        for (auto bit = 0; bit < FONT_CHAR_WIDTH; bit++)
+        {
+            *WorkLineRom = (fontSlice & 1) ? fgcolor : bgcolor;
             fontSlice >>= 1;
             WorkLineRom++;
         }
@@ -229,23 +382,39 @@ void drawline(int scanline, int selectedRow)
 
 static void putText(int x, int y, const char *text, int fgcolor, int bgcolor)
 {
-
-    if (text != nullptr)
+    if (text == nullptr || y < 0 || y >= SCREEN_ROWS)
     {
-        auto index = y * SCREEN_COLS + x;
-        auto maxLen = strlen(text);
-        if (strlen(text) > SCREEN_COLS - x)
+        return;
+    }
+
+    uint32_t cp;
+    int len;
+    while (x < SCREEN_COLS && (len = decodeUtf8(text, &cp)) > 0)
+    {
+        text += len;
+        charCell *cell = &screenBuffer[y * SCREEN_COLS + x];
+        if (isHalfWidth(cp))
         {
-            maxLen = SCREEN_COLS - x;
+            cell->kind = CELL_ASCII;
+            cell->glyph = cp - ASCII_FIRST;
+            cell->fgcolor = fgcolor;
+            cell->bgcolor = bgcolor;
+            x++;
+            continue;
         }
-        while (index < SCREENBUFCELLS && *text && maxLen > 0)
+        // Anything else is double width. Stop rather than let half a glyph
+        // spill past the right edge of the screen.
+        if (x + 1 >= SCREEN_COLS)
         {
-            screenBuffer[index].charvalue = *text++;
-            screenBuffer[index].fgcolor = fgcolor;
-            screenBuffer[index].bgcolor = bgcolor;
-            index++;
-            maxLen--;
+            break;
         }
+        int glyph = findWideGlyph(cp);
+        cell[0].kind = (glyph < 0) ? CELL_TOFU_LEAD : CELL_WIDE_LEAD;
+        cell[1].kind = (glyph < 0) ? CELL_TOFU_TRAIL : CELL_WIDE_TRAIL;
+        cell[0].glyph = cell[1].glyph = (glyph < 0) ? 0 : (uint16_t)glyph;
+        cell[0].fgcolor = cell[1].fgcolor = fgcolor;
+        cell[0].bgcolor = cell[1].bgcolor = bgcolor;
+        x += 2;
     }
 }
 
@@ -263,7 +432,8 @@ void ClearScreen(charCell *screenBuffer, int color)
     {
         screenBuffer[i].bgcolor = color;
         screenBuffer[i].fgcolor = color;
-        screenBuffer[i].charvalue = ' ';
+        screenBuffer[i].kind = CELL_ASCII;
+        screenBuffer[i].glyph = ' ' - ASCII_FIRST;
     }
 }
 
@@ -337,25 +507,26 @@ void showSplashScreen()
     ClearScreen(screenBuffer, bgcolor);
 
     strcpy(s, "maGc - infones");
-    putText(SCREEN_COLS / 2 - (strlen(s) + 4) / 2, 2, s, fgcolor, bgcolor);
+    putText(SCREEN_COLS / 2 - (strlen(s) + 4) / 2, 1, s, fgcolor, bgcolor);
 
-    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 9, 2, "N", CRED, bgcolor);
-    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 10, 2, "E", CGREEN, bgcolor);
-    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 11, 2, "S", CBLUE, bgcolor);
+    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 9, 1, "N", CRED, bgcolor);
+    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 10, 1, "E", CGREEN, bgcolor);
+    putText((SCREEN_COLS / 2 - (strlen(s)) / 2) + 11, 1, "S", CBLUE, bgcolor);
     // strcpy(s, "Emulator");
     //putText(SCREEN_COLS / 2 - strlen(s) / 2, 5, s, fgcolor, bgcolor);
      strcpy(s, "@pondahai");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 6, s, CLIGHTBLUE, bgcolor);
+    putText(SCREEN_COLS / 2 - strlen(s) / 2, 3, s, CLIGHTBLUE, bgcolor);
 
     strcpy(s, "Pico Port");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 9, s, fgcolor, bgcolor);
+    putText(SCREEN_COLS / 2 - strlen(s) / 2, 5, s, fgcolor, bgcolor);
      strcpy(s, "@shuichi_takano");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 10, s, CLIGHTBLUE, bgcolor);
+    putText(SCREEN_COLS / 2 - strlen(s) / 2, 6, s, CLIGHTBLUE, bgcolor);
 
-    strcpy(s, "Menu System & SD Card Support" );
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 13, s, fgcolor, bgcolor);
+    // Trimmed to fit: 14 rows of 16 px replaced the old 29 rows of 8 px.
+    strcpy(s, "Menu System & SD Card" );
+    putText(SCREEN_COLS / 2 - strlen(s) / 2, 8, s, fgcolor, bgcolor);
     strcpy(s, "@frenskefrens");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 14, s, CLIGHTBLUE, bgcolor);
+    putText(SCREEN_COLS / 2 - strlen(s) / 2, 9, s, CLIGHTBLUE, bgcolor);
 
     // strcpy(s, "(S)NES controller support");
     //putText(SCREEN_COLS / 2 - strlen(s) / 2, 17, s, fgcolor, bgcolor);
@@ -364,15 +535,10 @@ void showSplashScreen()
     //putText(SCREEN_COLS / 2 - strlen(s) / 2, 18, s, CLIGHTBLUE, bgcolor);
 
     strcpy(s, "PCB Design");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 21, s, fgcolor, bgcolor);
+    putText(SCREEN_COLS / 2 - strlen(s) / 2, 11, s, fgcolor, bgcolor);
 
     strcpy(s, "@pondahai");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 22, s, CLIGHTBLUE, bgcolor);
-
-    strcpy(s, "https://github.com/pondahai");
-    putText(SCREEN_COLS / 2 - strlen(s) / 2, 25, s, CLIGHTBLUE, bgcolor);
-    strcpy(s, "/rp2040-ili9341-infones");
-    putText(1, 26, s, CLIGHTBLUE, bgcolor);
+    putText(SCREEN_COLS / 2 - strlen(s) / 2, 12, s, CLIGHTBLUE, bgcolor);
     int startFrame = -1;
     while (true)
     {
@@ -716,9 +882,12 @@ void menu(uintptr_t NES_FILE_ADDR, char *errorMessage, bool isFatal)
         {
             if ((frameCount % 30) == 0)
             {
-                if (strlen(selectedRomOrFolder + horzontalScrollIndex) > VISIBLEPATHSIZE)
+                // Measured and advanced in whole characters: a byte at a time
+                // would cut a UTF-8 sequence in half, and a CJK name is half as
+                // many characters as it is cells wide.
+                if (displayWidth(selectedRomOrFolder + horzontalScrollIndex) > VISIBLEPATHSIZE)
                 {
-                    horzontalScrollIndex++;
+                    horzontalScrollIndex += utf8Advance(selectedRomOrFolder + horzontalScrollIndex);
                 }
                 else
                 {

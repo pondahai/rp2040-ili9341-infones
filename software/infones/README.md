@@ -236,6 +236,42 @@ Phase 1–5 已實機驗證，**Phase 6（FDS 擴充音源）仍是計畫**。
 
 ---
 
+## 選單的中文顯示 / Chinese text in the menu
+
+選單可以顯示簡繁中文，SD 卡上的中文檔名也讀得出來。
+
+The menu renders Simplified and Traditional Chinese, including Chinese
+filenames read off the SD card.
+
+- 字形取自 **Cubic 11（俐方體十一號）**，11×11 點陣字，以 size 12 算圖。
+  來源管線是 [`pondahai/ime-charset-font-bitmap`](https://github.com/pondahai/ime-charset-font-bitmap)，
+  資料則從 [`pondahai/pico_keyboard_ime_terminal_usb_host`](https://github.com/pondahai/pico_keyboard_ime_terminal_usb_host)
+  的 `picotype_data_optimized.h` 重新打包而來。**Cubic 11 的著作權屬於原作者。**
+- 那份來源資料一個像素用一個 byte 存（1.24 MB）。像素值只有 `0x00` 與 `0xFF`
+  兩種，所以改成一個像素一個 bit 是無損的，體積降到 212 KB —— 這才塞得進本專案
+  512 KB 的程式區。轉檔器是 [`software/tools/make_cjk_font.py`](../tools/make_cjk_font.py)，
+  產出 `font_cjk.h`：
+
+  ```bash
+  python3 software/tools/make_cjk_font.py /path/to/picotype_data_optimized.h
+  ```
+
+- Cubic 11 沒有收錄的字，來源資料裡是一個 2×2 點的 notdef 佔位符（共 3,119 個，
+  集中在罕用字與 `Ⅺ ⑴ ⒈` 這類符號）。打包時剔除，改由選單畫一個空心方框，
+  這樣缺字看得出來是缺字。繁體與簡體常用字各抽驗 465 字，涵蓋率都是 100%。
+- 版面因此從 32 欄 × 29 列（8×8 字）改為 **32 欄 × 14 列**（8×16 儲存格，
+  漢字佔兩格）。ROM 清單一頁從 24 筆變成 10 筆。
+- FatFs 改用 UTF-8（`FF_LFN_UNICODE 2`）。OEM 字碼頁同時從 932（日文）改為 437，
+  省下 57 KB —— 長檔名走 UTF-16↔UTF-8，本來就用不到日文那張表。
+
+### 已知限制 / Known limitations
+
+`RomLister` 的檔名上限是 80 **bytes**，而且超過就整筆跳過而非截斷
+（[`RomLister.cpp`](RomLister.cpp)）。UTF-8 一個漢字 3 bytes，所以超過約 26 個
+中文字的檔名不會出現在清單裡。這是既有行為，未在本次更動。
+
+---
+
 ## 文件 / Documentation
 
 - [`fds_plan.md`](../../fds_plan.md) — FDS 模擬的實作計畫、實測結果與已知限制
