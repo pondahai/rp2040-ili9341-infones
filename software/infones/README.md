@@ -28,10 +28,16 @@ burned into flash, and run from there.
 
 ## 編譯 / Build
 
+在開始編譯之前，請務必先初始化並更新子模組：
+
 ```bash
+# 在專案根目錄執行
+git submodule update --init --recursive
+
 cd software/infones
 mkdir build && cd build
 
+# 若您的環境未設定好 Pico SDK，需要手動指定路徑：
 cmake .. -G Ninja \
   -DPICO_SDK_PATH=<pico-sdk 的路徑> \
   -DPICO_TOOLCHAIN_PATH=<arm-none-eabi 工具鏈的路徑> \
@@ -72,6 +78,15 @@ cmake .. -G Ninja \
   -Dpioasm_DIR="$HOME/.pico-sdk/tools/2.2.0/pioasm"
 ```
 </details>
+
+> 💡 **Windows 環境的更簡單作法**：
+> 建議下載官方的 [Pico Setup for Windows](https://github.com/raspberrypi/pico-setup-windows/releases) 整合安裝檔。安裝完成後，從開始選單開啟 **「Pico - Developer Command Prompt」**。
+> 在這個專屬終端機內，系統已將 SDK 與工具鏈的環境變數全數設定完畢，您只需直接執行：
+> ```bash
+> cmake .. -G Ninja
+> ninja
+> ```
+> 即可成功編譯，完全不需手動指定那一大串路徑！
 
 ---
 
