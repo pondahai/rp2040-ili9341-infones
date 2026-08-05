@@ -45,6 +45,17 @@ ninja
 Produces `infoNES.uf2`. Hold BOOTSEL while plugging in USB, then drag the file
 onto the drive that appears.
 
+> 💡 **Windows 免按鈕自動燒錄小技巧**：
+> 如果您的 Pico 已經燒錄過並在執行中，您可以透過 PowerShell 送出 1200 baud 的序列埠連線訊號，強制 Pico 自動重啟進入 BOOTSEL 模式，並使用指令直接複製檔案，完全不需要按按鈕！
+> ```powershell
+> # 1. 觸發 1200 baud 重啟訊號
+> foreach ($port in @('COM2','COM3','COM4')) { try { $p = New-Object System.IO.Ports.SerialPort $port,1200; $p.Open(); Start-Sleep -Milliseconds 500; $p.Close() } catch {} }
+> Start-Sleep -Seconds 2
+> 
+> # 2. 自動將編譯好的 uf2 複製到 Pico 隨身碟 (假設自動掛載為 E:)
+> Copy-Item -Path .\build\infoNES.uf2 -Destination E:\
+> ```
+
 `PICO_SDK_PATH` **不指定的話**會退回預設值 `../../../pico-sdk`，也就是假設
 你在倉庫旁邊有一份 pico-sdk clone。多數情況下你會需要明確指定它。
 命令列的 `-DPICO_SDK_PATH=` 與環境變數 `PICO_SDK_PATH` 都比預設值優先。
