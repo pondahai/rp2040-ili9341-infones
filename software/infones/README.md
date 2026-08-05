@@ -161,6 +161,29 @@ picotool load yourgame.nes -t bin -o 0x10080000
 
 ---
 
+## 遊戲中的組合鍵 / In-game button combos
+
+遊戲執行中，**按住 Select** 再按下另一顆鍵（`main.cpp:539-594`）：
+Hold **Select** and press a second button while a game is running:
+
+| 組合鍵 | 動作 |
+|---|---|
+| Select + Start | 存檔並重開機回選單 |
+| Select + 左 / 右 | FDS 換面（上一面 / 下一面） |
+| Select + A | 切換 A 鍵連射 |
+| Select + B | 切換 B 鍵連射 |
+| Select + 上 | 開聲音 |
+| Select + 下 | 靜音 |
+
+- **Select + Start 是唯一會把存檔寫進 flash 的動作。** 遊戲內存的進度在那之前
+  只存在於 RAM，直接拔電就沒了。沒有寫過 SRAM 的遊戲會跳過寫入，不會平白磨損 flash
+  （`main.cpp:338-385`）。
+- **Select + 左/右只對 `.fds` 有效**，跑 `.nes` 時沒有作用。這兩個組合原本是切換
+  ROM，那段已經改掉。
+- 連射是每 8 幀放開一次，比常見的每 2 幀慢。
+
+---
+
 ## 玩 FDS 遊戲 / Playing FDS games
 
 **需要 FDS BIOS：把 `disksys.rom` 放在 SD 卡根目錄。**
@@ -170,7 +193,8 @@ An FDS BIOS is required: put `disksys.rom` in the SD card root.
 找不到的話選單會在底部顯示 `No /disksys.rom: .fds disabled`，
 且 `.fds` 檔案無法選取（`menu.cpp:296-299`）。
 
-支援雙面以上的磁片與遊戲存檔。存檔沿用既有的 flash NVRAM 機制，
+支援雙面以上的磁片與遊戲存檔。遊戲要求換面時用 **Select + 左/右**
+（見上方[組合鍵](#遊戲中的組合鍵--in-game-button-combos)）。存檔沿用既有的 flash NVRAM 機制，
 不會即時寫回 SD 卡。實作細節與已知限制見
 [`fds_plan.md`](../../fds_plan.md)。
 
