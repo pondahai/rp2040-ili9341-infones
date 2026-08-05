@@ -839,20 +839,24 @@ void menu(uintptr_t NES_FILE_ADDR, char *errorMessage, bool isFatal)
                                 fr = f_open(&fil, ROMINFOFILE, FA_CREATE_ALWAYS | FA_WRITE);
                                 if (fr == FR_OK)
                                 {
-                                    for (auto i = 0; i < strlen(selectedRomOrFolder) - 4; i++)
+                                    // f_write, not a f_putc loop. f_putc builds a
+                                    // fresh putbuff every call, and under
+                                    // FF_LFN_UNICODE 2 it holds the bytes of a
+                                    // multi-byte sequence in that buffer until the
+                                    // sequence completes -- so writing a UTF-8 name
+                                    // one byte at a time drops every non-ASCII
+                                    // character on the floor. f_write is binary and
+                                    // does no encoding conversion.
+                                    size_t nameLen = strlen(selectedRomOrFolder) - 4; // without ".nes"
+                                    UINT written;
+                                    fr = f_write(&fil, selectedRomOrFolder, nameLen, &written);
+                                    printf("%.*s\n", (int)nameLen, selectedRomOrFolder);
+                                    if (fr != FR_OK || written != nameLen)
                                     {
-
-                                        int x = f_putc(selectedRomOrFolder[i], &fil);
-                                        printf("%c", selectedRomOrFolder[i]);
-                                        if (x < 0)
-                                        {
-                                            snprintf(globalErrorMessage, 40, "Error writing file %d", fr);
-                                            printf("%s\n", globalErrorMessage);
-                                            errorInSavingRom = true;
-                                            break;
-                                        }
+                                        snprintf(globalErrorMessage, 40, "Error writing file %d", fr);
+                                        printf("%s\n", globalErrorMessage);
+                                        errorInSavingRom = true;
                                     }
-                                    printf("\n");
                                 }
                                 else
                                 {
