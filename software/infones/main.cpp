@@ -1810,7 +1810,9 @@ int main()
         if (fr == FR_OK)
         {
             size_t r;
-            fr = f_read(&fil, selectedRom, sizeof(selectedRom), &r);        
+            // Leave room for the terminator below: a file exactly sizeof()
+            // bytes long would otherwise write one past the end.
+            fr = f_read(&fil, selectedRom, sizeof(selectedRom) - 1, &r);
             if (fr != FR_OK)
             {
                 snprintf(ErrorMessage, 40, "Cannot read %s:%d\n", ROMINFOFILE, fr);
