@@ -3,6 +3,7 @@
 NES 與 FDS（紅白機磁碟機）模擬器韌體。遊戲從 SD 卡選取，燒進 flash 後執行。
 NES and Famicom Disk System emulator firmware. Games are picked from an SD card,
 burned into flash, and run from there.
+<img width="2816" height="1536" alt="Gemini_Generated_Image_bt86ppbt86ppbt86" src="https://github.com/user-attachments/assets/bd178f16-6cb8-407d-9d23-00acbdd034ac" />
 
 ---
 
