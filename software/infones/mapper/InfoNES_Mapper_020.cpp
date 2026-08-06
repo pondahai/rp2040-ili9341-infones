@@ -239,10 +239,13 @@ struct FDS_TraceRec
 {
   WORD wStart;    /* head position when the transfer was armed        */
   WORD wEnd;      /* head position when it stopped, before the rewind */
-  WORD wCount;    /* bytes the CPU actually collected                 */
-  BYTE byFirst;   /* first byte handed over -- block type on a good read */
+  WORD wCount;    /* bytes the CPU actually moved                     */
+  WORD wJOfs;     /* journal entry offset, writes only                */
+  WORD wJLen;     /* journal entry length, writes only                */
+  BYTE byFirst;   /* first byte moved -- block type on a good read    */
   BYTE byCtrl;    /* the $4025 value that stopped the transfer        */
   BYTE byRewound; /* whether the 2-byte CRC rewind fired              */
+  BYTE byWrite;   /* 0 = read transfer, 1 = write transfer            */
   BYTE bySide;
 };
 
@@ -258,9 +261,12 @@ static void FDS_TraceStart(void)
   e->wStart = (WORD)FDS_DiskPos;
   e->wEnd = (WORD)FDS_DiskPos;
   e->wCount = 0;
+  e->wJOfs = 0;
+  e->wJLen = 0;
   e->byFirst = 0xff;
   e->byCtrl = 0;
   e->byRewound = 0;
+  e->byWrite = (FDS_Regs[5] & FDS_CTRL_READ_MODE) ? 0 : 1;
   e->bySide = (BYTE)FDS_CurrentSide;
   FDS_TraceOpen = true;
 }
@@ -291,6 +297,14 @@ static void FDS_TraceStop(BYTE byCtrl, bool bRewound)
   e->wEnd = (WORD)FDS_DiskPos;
   e->byCtrl = byCtrl;
   e->byRewound = bRewound ? 1 : 0;
+  /* Captured before the caller clears FDS_WriteEntry. The journal entry is
+     what a later read will overlay onto the image, so its offset and length
+     are the thing to compare against how far the head actually moved. */
+  if (FDS_WriteEntry >= 0)
+  {
+    e->wJOfs = (WORD)FDS_SaveIndex[FDS_WriteEntry].dwOffset;
+    e->wJLen = (WORD)FDS_SaveIndex[FDS_WriteEntry].dwLength;
+  }
   FDS_TraceOpen = false;
   FDS_TraceIdx = (FDS_TraceIdx + 1) % FDS_TRACE_ENTRIES;
   if (FDS_TraceFilled < FDS_TRACE_ENTRIES)
@@ -328,11 +342,13 @@ static void FDS_TraceHsync(void)
     int i = (FDS_TraceIdx + FDS_TRACE_ENTRIES - FDS_TraceFilled + k) %
             FDS_TRACE_ENTRIES;
     const struct FDS_TraceRec *e = &FDS_Trace[i];
-    InfoNES_MessageBox("XFER %2d s=%d st=%5u b=%02x n=%5u en=%5u c=%02x r=%d",
-                       k, (int)e->bySide, (unsigned)e->wStart,
-                       (unsigned)e->byFirst, (unsigned)e->wCount,
-                       (unsigned)e->wEnd, (unsigned)e->byCtrl,
-                       (int)e->byRewound);
+    InfoNES_MessageBox(
+        "XFER %2d s=%d %s st=%5u b=%02x n=%5u en=%5u c=%02x r=%d "
+        "jofs=%5u jlen=%5u",
+        k, (int)e->bySide, e->byWrite ? "W" : "R", (unsigned)e->wStart,
+        (unsigned)e->byFirst, (unsigned)e->wCount, (unsigned)e->wEnd,
+        (unsigned)e->byCtrl, (int)e->byRewound, (unsigned)e->wJOfs,
+        (unsigned)e->wJLen);
   }
 }
 #endif /* FDS_XFER_TRACE */
@@ -862,6 +878,9 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     if (Map20_DriveRunning() && !(FDS_Regs[5] & FDS_CTRL_READ_MODE))
     {
       Map20_SaveWriteByte(byData);
+#if FDS_XFER_TRACE
+      FDS_TraceByte(byData);
+#endif
       if (FDS_DiskPos < FDS_SIDE_SIZE - 1)
       {
         FDS_DiskPos++;
