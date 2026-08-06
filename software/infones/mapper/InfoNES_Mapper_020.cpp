@@ -203,6 +203,141 @@ static int FDS_DbgFrameIdx = 0;
 #endif
 
 /*-------------------------------------------------------------------*/
+/*  Block-level transfer trace                                       */
+/*                                                                   */
+/*  For the Zelda side B "ERR. 24" report. Error 24 is the BIOS       */
+/*  failing to recognise a file header block (block type $03) where   */
+/*  it expected one; 22 and 23 are the same complaint about the disk  */
+/*  info and file amount blocks. Reaching 24 therefore means blocks   */
+/*  $01 and $02 were delivered correctly and alignment was lost       */
+/*  somewhere after that -- possibly several good $03/$04 pairs in.   */
+/*                                                                   */
+/*  The prime suspect is the gap/CRC shortcut listed in fds_plan.md   */
+/*  7.5: an .fds image carries no CRC bytes, so Map20_Apu() steps the */
+/*  head back 2 on the falling edge of the start bit to compensate.   */
+/*  That rewind is skipped when the CRC control bit is set in the     */
+/*  same write, and any block that ends that way leaves the head 2    */
+/*  bytes off for good -- which looks exactly like ERR 24.            */
+/*                                                                   */
+/*  This records one entry per read transfer so the two can be told   */
+/*  apart. Run side A and side B and compare: on a healthy load every */
+/*  entry's wStart equals the previous entry's wEnd minus the rewind, */
+/*  and byFirst is a plausible block type. The entry where byFirst    */
+/*  stops being a block type is where alignment went.                 */
+/*                                                                   */
+/*  Left at 1 on this branch because measuring is the only reason the  */
+/*  branch exists. It must go back to 0 before any of this reaches     */
+/*  main -- the per-entry printing is far too chatty to ship.          */
+/*-------------------------------------------------------------------*/
+#define FDS_XFER_TRACE 1
+
+#if FDS_XFER_TRACE
+#define FDS_TRACE_ENTRIES 20
+#define FDS_TRACE_PERIOD (262 * 60 * 3) /* scanlines in about 3 seconds */
+
+struct FDS_TraceRec
+{
+  WORD wStart;    /* head position when the transfer was armed        */
+  WORD wEnd;      /* head position when it stopped, before the rewind */
+  WORD wCount;    /* bytes the CPU actually collected                 */
+  BYTE byFirst;   /* first byte handed over -- block type on a good read */
+  BYTE byCtrl;    /* the $4025 value that stopped the transfer        */
+  BYTE byRewound; /* whether the 2-byte CRC rewind fired              */
+  BYTE bySide;
+};
+
+static struct FDS_TraceRec FDS_Trace[FDS_TRACE_ENTRIES];
+static int FDS_TraceIdx = 0;    /* next slot to write */
+static int FDS_TraceFilled = 0;
+static bool FDS_TraceOpen = false;
+static int FDS_TraceTick = 0;
+
+static void FDS_TraceStart(void)
+{
+  struct FDS_TraceRec *e = &FDS_Trace[FDS_TraceIdx];
+  e->wStart = (WORD)FDS_DiskPos;
+  e->wEnd = (WORD)FDS_DiskPos;
+  e->wCount = 0;
+  e->byFirst = 0xff;
+  e->byCtrl = 0;
+  e->byRewound = 0;
+  e->bySide = (BYTE)FDS_CurrentSide;
+  FDS_TraceOpen = true;
+}
+
+static void FDS_TraceByte(BYTE byData)
+{
+  struct FDS_TraceRec *e;
+  if (!FDS_TraceOpen)
+  {
+    return;
+  }
+  e = &FDS_Trace[FDS_TraceIdx];
+  if (e->wCount == 0)
+  {
+    e->byFirst = byData;
+  }
+  e->wCount++;
+}
+
+static void FDS_TraceStop(BYTE byCtrl, bool bRewound)
+{
+  struct FDS_TraceRec *e;
+  if (!FDS_TraceOpen)
+  {
+    return;
+  }
+  e = &FDS_Trace[FDS_TraceIdx];
+  e->wEnd = (WORD)FDS_DiskPos;
+  e->byCtrl = byCtrl;
+  e->byRewound = bRewound ? 1 : 0;
+  FDS_TraceOpen = false;
+  FDS_TraceIdx = (FDS_TraceIdx + 1) % FDS_TRACE_ENTRIES;
+  if (FDS_TraceFilled < FDS_TRACE_ENTRIES)
+  {
+    FDS_TraceFilled++;
+  }
+}
+
+/* Reprints the whole ring every few seconds rather than printing each
+   entry as it happens. Two reasons: a USB CDC re-enumeration leaves the
+   host on a stale handle that reads nothing and reports no error
+   (fds_plan.md 7.8), and once the BIOS gives up and shows ERR. 24 the
+   disk stops, so the ring freezes holding the run-up to the failure and
+   every later reprint carries it. Catching any one reprint is enough. */
+static void FDS_TraceHsync(void)
+{
+  int k;
+
+  if (++FDS_TraceTick < FDS_TRACE_PERIOD)
+  {
+    return;
+  }
+  FDS_TraceTick = 0;
+  if (FDS_TraceFilled == 0)
+  {
+    return;
+  }
+
+  InfoNES_MessageBox("XFER side=%d entries=%d (oldest first)",
+                     FDS_CurrentSide, FDS_TraceFilled);
+  for (k = 0; k < FDS_TraceFilled; k++)
+  {
+    /* Oldest first. FDS_TraceIdx points at the next slot to write, so it
+       is also the oldest once the ring has wrapped. */
+    int i = (FDS_TraceIdx + FDS_TRACE_ENTRIES - FDS_TraceFilled + k) %
+            FDS_TRACE_ENTRIES;
+    const struct FDS_TraceRec *e = &FDS_Trace[i];
+    InfoNES_MessageBox("XFER %2d s=%d st=%5u b=%02x n=%5u en=%5u c=%02x r=%d",
+                       k, (int)e->bySide, (unsigned)e->wStart,
+                       (unsigned)e->byFirst, (unsigned)e->wCount,
+                       (unsigned)e->wEnd, (unsigned)e->byCtrl,
+                       (int)e->byRewound);
+  }
+}
+#endif /* FDS_XFER_TRACE */
+
+/*-------------------------------------------------------------------*/
 /*  Interface used by the loader (main.cpp)                          */
 /*-------------------------------------------------------------------*/
 
@@ -755,7 +890,12 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
        bits, because the BIOS also ends transfers by asserting reset. */
     if (!(byData & FDS_CTRL_XFER_START))
     {
-      if ((byPrev & FDS_CTRL_XFER_START) && !(byData & FDS_CTRL_CRC))
+      bool bRewound = (byPrev & FDS_CTRL_XFER_START) && !(byData & FDS_CTRL_CRC);
+#if FDS_XFER_TRACE
+      /* Logged before the rewind so the raw head position is visible. */
+      FDS_TraceStop(byData, bRewound);
+#endif
+      if (bRewound)
       {
         FDS_DiskPos -= 2;
         if (FDS_DiskPos < 0)
@@ -795,6 +935,9 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
     if ((byData & FDS_CTRL_XFER_START) && bNowRunning &&
         (!(byPrev & FDS_CTRL_XFER_START) || !bWasRunning))
     {
+#if FDS_XFER_TRACE
+      FDS_TraceStart();
+#endif
       FDS_SeekCycles = FDS_SEEK_CYCLES;
       FDS_XferArmed = true;
       if (!(byData & FDS_CTRL_READ_MODE))
@@ -859,6 +1002,9 @@ BYTE __not_in_flash_func(Map20_ReadApu)(WORD wAddr)
       {
         byRet = FDS_DiskImage[FDS_CurrentSide * FDS_SIDE_SIZE + FDS_DiskPos];
       }
+#if FDS_XFER_TRACE
+      FDS_TraceByte(byRet);
+#endif
       if (FDS_DiskPos < FDS_SIDE_SIZE - 1)
       {
         FDS_DiskPos++;
@@ -937,6 +1083,10 @@ void __not_in_flash_func(Map20_HSync)()
     FDS_DbgDiskIrq = 0;
     FDS_DbgCtrlWrites = 0;
   }
+#endif
+
+#if FDS_XFER_TRACE
+  FDS_TraceHsync();
 #endif
 
   /*-----------------------------------------------------------------*/
