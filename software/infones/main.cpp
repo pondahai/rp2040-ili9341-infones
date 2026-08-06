@@ -174,14 +174,30 @@ struct AudioRingBuffer {
         return AUDIO_RING_BUFFER_SIZE - (t - h);
     }
 
-    void write(const uint8_t* data, int len) {
+    // Returns the number of bytes actually written. Truncates to the free
+    // space instead of letting head run over tail: overrunning would make
+    // readable_size() jump from "nearly full" to "nearly empty" and play the
+    // 8 KB still queued back out of order.
+    int write(const uint8_t* data, int len) {
         check_initialized();
         uint32_t saved_irq = spin_lock_blocking(lock);
+
+        // Recomputed under the lock rather than calling writable_size(),
+        // which samples head/tail without holding it.
+        int h = head;
+        int t = tail;
+        int occupied = (h >= t) ? (h - t) : (AUDIO_RING_BUFFER_SIZE - (t - h));
+        int space = AUDIO_RING_BUFFER_SIZE - 1 - occupied;
+        if (len > space) len = space;
+
         for(int i=0; i<len; ++i) {
-             buffer[head] = data[i];
-             head = (head + 1) % AUDIO_RING_BUFFER_SIZE;
+             buffer[h] = data[i];
+             h = (h + 1) % AUDIO_RING_BUFFER_SIZE;
         }
+        head = h;
+
         spin_unlock(lock, saved_irq);
+        return len;
     }
 
     int read(uint8_t* dest, int max_len) {
@@ -746,6 +762,10 @@ int __not_in_flash_func(InfoNES_GetSoundBufferSize)()
 
 #define TARGET_LATENCY_BYTES 1500 // Approx 2 frames of audio at 22050Hz
 
+// Upper bound on how long the throttle below may block core0. Normal
+// throttling waits well under a frame; only a stalled core1 reaches this.
+#define AUDIO_THROTTLE_TIMEOUT_US 50000
+
 /*
  *  call from InfoNES_pAPUHsync
  */
@@ -763,9 +783,20 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
         // Latency Control / Synchronization
         // If the buffer is too full, wait for Core 1 to consume some samples.
         // This throttles Core 0 to match the audio playback speed.
-        while (audioRing.readable_size() > TARGET_LATENCY_BYTES)
+        if (audioRing.readable_size() > TARGET_LATENCY_BYTES)
         {
-            sleep_us(100); 
+            // Bounded wait. If core1 stops draining the ring -- a stalled
+            // audio DMA chain leaves it spinning in audio_mixer_step()
+            // forever -- an unbounded loop here freezes video, sound and
+            // input with no watchdog to recover, so give up after
+            // AUDIO_THROTTLE_TIMEOUT_US and let write() drop what does not
+            // fit. The throttle itself is unchanged in the normal case.
+            uint64_t deadline = time_us_64() + AUDIO_THROTTLE_TIMEOUT_US;
+            do
+            {
+                sleep_us(100);
+            } while (audioRing.readable_size() > TARGET_LATENCY_BYTES &&
+                     time_us_64() < deadline);
         }
 
         int n = remaining;
@@ -789,11 +820,13 @@ void __not_in_flash_func(InfoNES_SoundOutput)(int samples, BYTE *wave1, BYTE *wa
 #endif
         }
 
-        // Write to RingBuffer, wait if full or just spin? 
-        // For now, valid write only what fits or overwrite?
-        // simple write
+        // Writes what fits and drops the rest. Only reachable when the
+        // throttle above timed out, i.e. core1 is not consuming.
         audioRing.write(snd_buf, n);
-        
+
+        // Advance by n regardless of how much was accepted: the wave
+        // pointers have already moved on, and counting the dropped bytes
+        // as outstanding would spin this loop forever.
         remaining -= n;
     }
 
