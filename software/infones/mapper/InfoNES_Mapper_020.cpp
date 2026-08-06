@@ -333,6 +333,26 @@ static void FDS_TraceHsync(void)
     return;
   }
 
+  /* The journal is the other half of the picture: it survives a ROM
+     re-burn (the NVRAM slot sits below NES_FILE_ADDR, outside the erased
+     range), so a bad entry written once stays until something overwrites
+     it. Each entry claims [ofs, ofs+len) and is overlaid on top of the
+     image by Map20_SaveLookup(), so comparing len against how far the
+     head actually moved during the matching W transfer is the test. */
+  {
+    int j;
+    InfoNES_MessageBox("JOURNAL count=%d used=%u", FDS_SaveCount,
+                       (unsigned)FDS_SaveUsed);
+    for (j = 0; j < FDS_SaveCount; j++)
+    {
+      InfoNES_MessageBox("JOURNAL %d side=%u ofs=%5u len=%5u dataofs=%5u", j,
+                         (unsigned)FDS_SaveIndex[j].dwSide,
+                         (unsigned)FDS_SaveIndex[j].dwOffset,
+                         (unsigned)FDS_SaveIndex[j].dwLength,
+                         (unsigned)FDS_SaveIndex[j].dwDataOfs);
+    }
+  }
+
   InfoNES_MessageBox("XFER side=%d entries=%d (oldest first)",
                      FDS_CurrentSide, FDS_TraceFilled);
   for (k = 0; k < FDS_TraceFilled; k++)
