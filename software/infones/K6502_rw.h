@@ -17,6 +17,7 @@
 #include "InfoNES.h"
 #include "InfoNES_System.h"
 #include "InfoNES_pAPU.h"
+#include "fds_repro_7_8.h"
 #include <pico.h>
 #include <stdio.h>
 
@@ -369,8 +370,15 @@ static inline void __not_in_flash_func(K6502_Write)(WORD wAddr, BYTE byData)
        also rewriting pulse channel 1 every frame. */
     if (wAddr > 0x4017)
     {
+      FDS_Repro78_Count(wAddr);
+#if !FDS_REPRO_7_8
       MapperApu(wAddr, byData);
       break;
+#endif
+      /* With FDS_REPRO_7_8 set we deliberately fall through into the old
+         masked decode. MapperApu() still runs, at the bottom of the case,
+         exactly as it did before 7.8 -- that is why the mapper kept
+         working and only the APU was corrupted. See fds_plan.md 7.10. */
     }
 
     switch (wAddr & 0x1f)
@@ -464,8 +472,21 @@ static inline void __not_in_flash_func(K6502_Write)(WORD wAddr, BYTE byData)
       break;
     }
 
+#if FDS_REPRO_7_8
+    /* The pre-7.8 tail: cartridge space still reached MapperApu(), it just
+       had to survive the masked decode above to get here. */
+    if (wAddr <= 0x4017)
+    {
+      APU_Reg[wAddr & 0x1f] = byData;
+    }
+    else
+    {
+      MapperApu(wAddr, byData);
+    }
+#else
     /* Write to APU Register */
     APU_Reg[wAddr & 0x1f] = byData;
+#endif
     break;
 
   case 0x6000: /* SRAM */

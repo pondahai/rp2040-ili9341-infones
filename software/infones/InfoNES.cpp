@@ -39,6 +39,7 @@
 #include "InfoNES_System.h"
 #include "InfoNES_Mapper.h"
 #include "InfoNES_pAPU.h"
+#include "fds_repro_7_8.h"
 #include "K6502.h"
 #include <assert.h>
 #include <pico.h>
@@ -731,6 +732,9 @@ int __not_in_flash_func(InfoNES_HSync)()
 
   InfoNES_pAPUHsync(!APU_Mute);
 //  util::WorkMeterMark(MARKER_SOUND);
+
+  /* Temporary, compiles away unless FDS_REPRO_7_8 is on. See fds_plan.md 7.10. */
+  FDS_Repro78_Hsync();
 
   // int tmpv = (PPU_Addr >> 12) + ((PPU_Addr >> 5) << 3);
   // tmpv -= PPU_Scanline >= 240 ? 0 : PPU_Scanline;
