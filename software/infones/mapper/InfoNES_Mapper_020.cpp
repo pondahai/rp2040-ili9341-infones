@@ -496,6 +496,31 @@ static void Map20_SaveWriteByte(BYTE byData)
   FDS_SaveDirty = true;
 }
 
+/* Drop the last nBytes from the entry currently being written, used to
+   take the CRC bytes back off the end when the head is rewound over
+   them. Only the tail entry can return payload to the pool; a reused
+   entry in the middle keeps its allocation, which is what
+   Map20_SaveBeginWrite() expects to grow back into next time. */
+static void Map20_SaveTrimWrite(DWORD dwBytes)
+{
+  struct FDS_SaveEntry *e;
+
+  if (FDS_WriteEntry < 0)
+  {
+    return;
+  }
+
+  e = &FDS_SaveIndex[FDS_WriteEntry];
+  e->dwLength = (e->dwLength > dwBytes) ? (e->dwLength - dwBytes) : 0;
+
+  if (FDS_WriteEntry == FDS_SaveCount - 1 &&
+      e->dwDataOfs + e->dwLength < FDS_SaveUsed)
+  {
+    FDS_SaveUsed = e->dwDataOfs + e->dwLength;
+  }
+  FDS_SaveDirty = true;
+}
+
 /*-------------------------------------------------------------------*/
 /*  Side switching                                                   */
 /*-------------------------------------------------------------------*/
@@ -762,6 +787,19 @@ void __not_in_flash_func(Map20_Apu)(WORD wAddr, BYTE byData)
         {
           FDS_DiskPos = 0;
         }
+        /* A write transfer has to give the journal the same treatment.
+           The head is stepped back over the two CRC bytes because the
+           image does not contain them, but those two bytes were also
+           handed to Map20_SaveWriteByte() and are sitting at the end of
+           the entry. Leaving them there makes the entry claim two bytes
+           more than the head actually covered, and the overhang lands on
+           the start of the next block -- on its type byte, which is the
+           one thing the BIOS checks. Zelda writes the 2-byte file amount
+           block at offset 56, and the 4-byte entry that produced reached
+           offset 58, the type byte of the first file header block: the
+           BIOS then read something other than $03 there and stopped with
+           ERR. 24. See fds_plan.md 7.11. */
+        Map20_SaveTrimWrite(2);
       }
       FDS_XferArmed = false;
       FDS_SeekCycles = 0;
