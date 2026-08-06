@@ -242,6 +242,7 @@ struct FDS_TraceRec
   WORD wCount;    /* bytes the CPU actually moved                     */
   WORD wJOfs;     /* journal entry offset, writes only                */
   WORD wJLen;     /* journal entry length, writes only                */
+  WORD wStray;    /* head steps taken since the previous transfer      */
   BYTE byFirst;   /* first byte moved -- block type on a good read    */
   BYTE byCtrl;    /* the $4025 value that stopped the transfer        */
   BYTE byRewound; /* whether the 2-byte CRC rewind fired              */
@@ -254,6 +255,15 @@ static int FDS_TraceIdx = 0;    /* next slot to write */
 static int FDS_TraceFilled = 0;
 static bool FDS_TraceOpen = false;
 static int FDS_TraceTick = 0;
+
+/* Head steps taken while no transfer was armed. $4031 advances DiskPos
+   whenever a disk is inserted -- it never checks that a transfer is
+   running -- so any stray read of the data port walks the head forward.
+   That is the leading suspect for the write in the Zelda capture starting
+   at 57 when the arithmetic says 56: block $01 is read as 58 bytes from 0,
+   the rewind puts the head at 56, and something moved it one more before
+   the write was armed. A nonzero stray= on the W line pins it down. */
+static int FDS_TraceStray = 0;
 
 static void FDS_TraceStart(void)
 {
@@ -268,6 +278,8 @@ static void FDS_TraceStart(void)
   e->byRewound = 0;
   e->byWrite = (FDS_Regs[5] & FDS_CTRL_READ_MODE) ? 0 : 1;
   e->bySide = (BYTE)FDS_CurrentSide;
+  e->wStray = (WORD)FDS_TraceStray;
+  FDS_TraceStray = 0;
   FDS_TraceOpen = true;
 }
 
@@ -276,6 +288,12 @@ static void FDS_TraceByte(BYTE byData)
   struct FDS_TraceRec *e;
   if (!FDS_TraceOpen)
   {
+    /* Called from the same place the head is advanced, so this counts
+       exactly the steps taken outside a transfer. */
+    if (FDS_TraceStray < 0xffff)
+    {
+      FDS_TraceStray++;
+    }
     return;
   }
   e = &FDS_Trace[FDS_TraceIdx];
@@ -364,11 +382,11 @@ static void FDS_TraceHsync(void)
     const struct FDS_TraceRec *e = &FDS_Trace[i];
     InfoNES_MessageBox(
         "XFER %2d s=%d %s st=%5u b=%02x n=%5u en=%5u c=%02x r=%d "
-        "jofs=%5u jlen=%5u",
+        "jofs=%5u jlen=%5u stray=%u",
         k, (int)e->bySide, e->byWrite ? "W" : "R", (unsigned)e->wStart,
         (unsigned)e->byFirst, (unsigned)e->wCount, (unsigned)e->wEnd,
         (unsigned)e->byCtrl, (int)e->byRewound, (unsigned)e->wJOfs,
-        (unsigned)e->wJLen);
+        (unsigned)e->wJLen, (unsigned)e->wStray);
   }
 }
 #endif /* FDS_XFER_TRACE */
