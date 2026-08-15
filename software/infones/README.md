@@ -125,6 +125,44 @@ linker script 重新 link。
 
 **所以 SD 卡上放 `infoNES_standalone.uf2` 就好**，不必為兩種用法各準備一個檔案。
 
+### ROM 儲存區也跟著往上推
+
+本體往後推 16KB 之後，image 的尾巴會壓到 ROM 儲存區（`NES_FILE_ADDR`）與從那裡
+往下長的 NVRAM 存檔槽。所以偏移模式把 `NES_FILE_ADDR` 一起推同樣的 16KB：
+
+| | image 結束 | 存檔槽 slot0 | ROM 區 | 餘裕 |
+|---|---|---|---|---|
+| 預設 | `0x1007d078` | `0x1007e000` | `0x10080000` | 3,976 bytes |
+| 偏移 | `0x10080f78` | `0x10082000` | **`0x10084000`** | 4,232 bytes |
+
+代價是 ROM 可用空間少 16KB（還剩約 1.5MB）。
+
+**這個相鄰關係一直沒有被檢查過**，只是「剛好」沒撞到——預設編譯的餘裕本來
+就只有約 4KB。所以順帶加了 `check_flash_layout.cmake`，**兩種模式都會跑**：
+算出 image 結束位址跟 NVRAM 起點比對，重疊就讓 build 失敗。image 變大或
+位址改動時，這裡會先報錯，而不是等到燒進去黑畫面才發現。
+
+build 時會看到：
+
+```
+-- flash 佈局 OK: image 0x10004000..0x10080f78, NVRAM slot0 0x10082000, 餘裕 4232 bytes
+```
+
+### 實機驗證狀態
+
+整條鏈已在實機驗證通過：
+
+```
+冷開機 → 載入器選單 → 選 infoNES_standalone.uf2 → 燒進 0x10004000 → 交棒
+→ infones 選單 → 選一個 NES → 燒 ROM 並 watchdog 重置 → 載入器認出是軟重置、
+無聲穿透 → 遊戲正常遊玩
+```
+
+也確認**預設模式（不加 `LOADER_OFFSET_BUILD`）的輸出與改動前一致**：
+`.boot2` 在 `0x10000000`、`.text` 在 `0x10000100`，2001 塊 UF2。
+
+尚未驗證：按實體 RESET 的行為、燒錄中途失敗等錯誤路徑。
+
 ---
 
 ## 選擇 LCD / Selecting the LCD
@@ -192,6 +230,9 @@ SD:/
 選取遊戲後會把映像燒進 flash（`NES_FILE_ADDR = 0x10080000`）再重開機——
 重開是必要的，這樣音訊才會正確初始化。之後每次開機都會直接跑那個遊戲，
 要換片再進選單。
+
+> 偏移模式（`LOADER_OFFSET_BUILD=ON`）下這個位址是 **`0x10084000`**，
+> 見下面「搭配開機載入器」。
 
 也可以跳過 SD 卡，直接用 picotool 把 ROM 燒到同一個位址：
 You can also skip the SD card and burn a ROM to that address with picotool:
@@ -346,6 +387,7 @@ filenames read off the SD card.
   省下 57 KB —— 長檔名走 UTF-16↔UTF-8，本來就用不到日文那張表。
 - Flash 用量 296.5 KB → **450.8 KB / 512 KB**。`NES_FILE_ADDR` 與其下的存檔
   slot 都沒有移動，已燒錄的 ROM 與存檔不受影響。
+  （偏移模式是例外：那裡整個區域往上推了 16KB，見「搭配開機載入器」。）
 
 11 px 是這套字型的先天上限：`國` `国` 這類筆畫少的很清楚，`選` `體` 這類筆畫
 多的會糊。要更清晰就得換 16×16 字型，那需要約 300 KB，得先把 `NES_FILE_ADDR`
