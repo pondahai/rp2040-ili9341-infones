@@ -86,6 +86,47 @@ cmake .. -G Ninja \
 
 ---
 
+## 搭配開機載入器 / Building for the boot loader
+
+掌機的開機選單 [rp2040-retro-loader](https://github.com/pondahai/rp2040-retro-loader)
+可以從 SD 卡挑一個 `.uf2` 燒進 flash 再執行。要讓 infoNES 能被它載入，必須
+**用偏移模式重新編譯**——載入器自己住在 flash 最前面的 16KB，本體得讓開。
+
+```bash
+cmake .. -G Ninja \
+  -DLOADER_OFFSET_BUILD=ON \
+  -DLOADER_PATH=<rp2040-retro-loader 的路徑> \
+  <其餘參數同上>
+```
+
+`LOADER_PATH` 不指定的話會退回 `../../../rp2040-retro-loader`，也就是假設兩個
+倉庫並排放。**預設是關閉的**，不加這個選項的話編譯流程跟以前完全一樣。
+
+### 為什麼不能只是把 UF2 往後搬
+
+RP2040 是 XIP（就地執行），所有資料位址在編譯時就寫死在機器碼裡了。整份
+image 往後推 16KB，那些寫死的數字還是指向舊位址，一執行就飛掉。只能改
+linker script 重新 link。
+
+偏移模式同時也拿掉了 image 自己的 boot2：ROM 只認 flash 最前面那 256 bytes，
+那是載入器／跳板的地盤，本體那份永遠不會被執行（而且它結尾寫死跳
+`0x10000100`，真被執行還會跳錯地方）。
+
+### 產出兩個檔案
+
+| 檔案 | 內容 | 用途 |
+|---|---|---|
+| `infoNES.uf2` | 只有本體，前 16KB 是空的 | **不能單獨燒錄**（開機沒東西可執行） |
+| `infoNES_standalone.uf2` | 跳板 + 本體 | USB 拖進去、或放 SD 卡給載入器，**兩種都可以** |
+
+合併步驟是 build 的 POST_BUILD 自動跑的，前提是 loader 那邊已經編過一次
+（需要 `build/trampoline.uf2`）。找不到跳板的話只會警告、不擋 build，
+`infoNES.uf2` 仍然可以放進 SD 卡給載入器用。
+
+**所以 SD 卡上放 `infoNES_standalone.uf2` 就好**，不必為兩種用法各準備一個檔案。
+
+---
+
 ## 選擇 LCD / Selecting the LCD
 
 `CMakeLists.txt:47-48`，把要用的那一行取消註解：
