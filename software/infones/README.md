@@ -86,6 +86,144 @@ cmake .. -G Ninja \
 
 ---
 
+## 搭配開機載入器 / Building for the boot loader
+
+### 前因：為什麼會有這個模式
+
+這台掌機是「一塊硬體、多種韌體」——infoNES、DOOM、Apple II、MakeCode Arcade
+各是一份獨立的 UF2。原本要換韌體，得接上電腦、按住 BOOTSEL、把檔案拖進虛擬磁碟。
+
+想改成**開機時從 SD 卡選一個直接換**，就需要一個常駐的載入器
+（[rp2040-retro-loader](https://github.com/pondahai/rp2040-retro-loader)）。
+而 RP2040 的 bootrom 只認 flash 最前面那 256 bytes，所以載入器**必須**住在
+`0x10000000`——那原本是 infoNES 自己的位置。
+
+於是每個要被載入的專題都得讓開，本體從 `0x10004000` 開始，前面 16KB 留給載入器。
+
+```
+0x10000000  載入器 或 跳板（16KB，兩者擇一）
+0x10004000  infoNES 本體（無自己的 boot2，最前面就是向量表）
+0x10084000  ROM 儲存區（偏移模式，預設是 0x10080000）
+```
+
+### 為什麼不能只是把 UF2 往後搬
+
+RP2040 是 XIP（就地執行），所有資料位址在編譯時就寫死在機器碼裡了。整份
+image 往後推 16KB，那些寫死的數字還是指向舊位址，一執行就飛掉。只能改
+linker script 重新 link。
+
+### 怎麼用
+
+```bash
+cmake .. -G Ninja   -DLOADER_OFFSET_BUILD=ON   -DLOADER_PATH=<rp2040-retro-loader 的路徑>   <其餘參數同上>
+```
+
+`LOADER_PATH` 不指定的話會退回 `../../../rp2040-retro-loader`，也就是假設兩個
+倉庫並排放。**預設是關閉的**，不加這個選項的話編譯流程跟以前完全一樣。
+
+### 實際改了哪些東西
+
+| 項目 | 內容 | 為什麼 |
+|---|---|---|
+| linker script | 換成 loader 倉庫的 `app/memmap_app.ld` | FLASH ORIGIN `0x10000000` → `0x10004000` |
+| boot2 | 從 image 裡丟掉 | ROM 只認 flash 最前面 256 bytes，那是載入器／跳板的地盤。本體那份永遠不會被執行，而且它結尾寫死跳 `0x10000100`，真被執行還會跳錯地方 |
+| `NES_FILE_ADDR` | `0x10080000` → `0x10084000` | 絕對位址不會跟著 linker script 位移，本體推後 16KB 之後尾巴會壓上去 |
+| `check_flash_layout.cmake` | 新增，**兩種模式都跑** | image 尾巴、NVRAM 存檔槽、ROM 區的相對位置從來沒有被檢查過 |
+| UF2 合併 | POST_BUILD 自動接上跳板 | 讓同一份檔案也能用 USB 單獨燒錄 |
+
+### 產出哪些檔案
+
+| 產物 | 給 retro-loader | 單獨燒錄 |
+|---|---|---|
+| `infoNES.uf2`（預設模式） | ✗ | ✓ |
+| `infoNES.uf2`（偏移模式） | ✓ | ✗ 前 16KB 是空的，開機沒東西可執行 |
+| **`infoNES_standalone.uf2`**（偏移 + 跳板） | **✓** | **✓** |
+
+**日常只要發佈 `infoNES_standalone.uf2` 就好**，兩種用法都吃得下：USB 拖進去時
+跳板落在 `0x10000000` 負責開機；放進 SD 卡時載入器會把跳板那幾個 block 丟掉、
+只寫本體。
+
+合併是 build 的 POST_BUILD 自動跑的，前提是 loader 那邊已經編過一次
+（需要 `build/trampoline.uf2`）。找不到跳板只會警告、不擋 build。
+
+### ROM 儲存區也跟著往上推
+
+本體往後推 16KB 之後，image 的尾巴會壓到 ROM 儲存區（`NES_FILE_ADDR`）與從那裡
+往下長的 NVRAM 存檔槽（`NES_FILE_ADDR - SRAM_SIZE * (slot+1)`）：
+
+| | image 結束 | 存檔槽 slot0 | ROM 區 | 餘裕 |
+|---|---|---|---|---|
+| 預設 | `0x1007d078` | `0x1007e000` | `0x10080000` | 3,976 bytes |
+| 偏移（未修） | `0x10080f78` | `0x1007e000` | `0x10080000` | **重疊 12,152 bytes** |
+| 偏移（修正後） | `0x10080f78` | `0x10082000` | `0x10084000` | 4,232 bytes |
+
+代價是 ROM 可用空間少 16KB（還剩約 1.5MB）。
+
+### 踩到的三個坑
+
+**① `NES_FILE_ADDR` 沒跟著位移 → 黑畫面**
+
+未修時 infoNES 開機會把自己的 `.data` 初值讀成 ROM，選遊戲時 `menu.cpp` 還會
+erase 掉那份初值。**症狀是全黑而且極難查**——USB 正常列舉（代表中斷、timer 都活著），
+flash 內容看起來也「有東西」，得把 image 結束位址算出來跟資料區比對才看得出重疊。
+
+**② 交棒時中斷沒重新打開 → 卡在第一個 `sleep_ms()`**
+
+這是載入器那邊的問題（已修），但症狀出現在 infoNES 身上：`display_init()` 第一行
+就是 `sleep_ms(100)`，而背光是那個函式**最後**才點亮的，所以看起來像完全沒開機。
+原因是 pico-sdk 的 `crt0.S` 從頭到尾沒碰過 PRIMASK——正常開機時它本來就是 0，
+SDK 沒有理由去清它。
+
+**③ 拖曳燒錄會安靜地截斷**
+
+1 MB 的合併版 UF2 拖進 `RPI-RP2` 磁碟，只有前面 22 塊跳板寫進去，本體完全沒寫，
+而且沒有任何錯誤訊息。**改用 `picotool load -v`**（`-v` 會驗證）。
+這個坑最花時間，因為它讓「跳板沒問題」看起來像「跳板壞了」。
+
+### 一個值得記下來的發現
+
+修 ① 的時候順帶算了一下**預設編譯**的佈局，才發現 image 尾巴離 NVRAM 存檔槽
+**本來就只剩約 4 KB**。這個相鄰關係從來沒有被檢查過，只是一直「剛好」沒撞到。
+
+所以 `check_flash_layout.cmake` 是兩種模式都跑的。FDS Phase 6（波表音源）、
+16×16 中文字型這些都會讓 image 變大，屆時 build 會先報錯，而不是燒進去才發現黑畫面：
+
+```
+-- flash 佈局 OK: image 0x10000000..0x1007d078, NVRAM slot0 0x1007e000, 餘裕 3976 bytes
+```
+
+**「剛好沒撞到」跟「確定不會撞」之間的差別，就是一道 build 期檢查。**
+
+### 實機驗證狀態
+
+整條鏈已在實機驗證通過：
+
+```
+冷開機 → 載入器選單 → 選 infoNES_standalone.uf2 → 燒進 0x10004000 → 交棒
+→ infoNES 選單 → 選一個 NES → 燒 ROM 並 watchdog 重置 → 載入器認出是軟重置、
+無聲穿透 → 遊戲正常遊玩
+```
+
+也確認**預設模式（不加 `LOADER_OFFSET_BUILD`）的輸出與改動前一致**：
+`.boot2` 在 `0x10000000`、`.text` 在 `0x10000100`，2001 塊 UF2。
+
+> 順帶查證：遊戲中 **Select + Start「回選單」不重置晶片**，走的是 `PAD_SYS_QUIT`
+> → `InfoNES_Main()` 返回 → 主迴圈清空 `selectedRom` → 進選單。所以不受載入器
+> 「軟重置直接穿透」的影響。infoNES 只在「選單 → 遊戲」方向用重置。
+
+尚未驗證：按實體 RESET 的行為、燒錄中途失敗等錯誤路徑。
+
+### 目前沒有把偏移設成預設
+
+雖然 `infoNES_standalone.uf2` 兩種用法都吃得下，但把偏移設成預設會讓 infoNES 的
+**預設編譯路徑依賴一個外部倉庫**（linker script 和跳板都在 loader 那邊）。
+對只想單獨玩 infoNES 的人是不必要的負擔。
+
+之後要切斷這個依賴，作法是把 `memmap_app.ld` 用 `gen_app_ld.py` 生成一份複製進
+infoNES，那時再談要不要設成預設。
+
+---
+
 ## 選擇 LCD / Selecting the LCD
 
 `CMakeLists.txt:47-48`，把要用的那一行取消註解：
@@ -151,6 +289,9 @@ SD:/
 選取遊戲後會把映像燒進 flash（`NES_FILE_ADDR = 0x10080000`）再重開機——
 重開是必要的，這樣音訊才會正確初始化。之後每次開機都會直接跑那個遊戲，
 要換片再進選單。
+
+> 偏移模式（`LOADER_OFFSET_BUILD=ON`）下這個位址是 **`0x10084000`**，
+> 見下面「搭配開機載入器」。
 
 也可以跳過 SD 卡，直接用 picotool 把 ROM 燒到同一個位址：
 You can also skip the SD card and burn a ROM to that address with picotool:
@@ -263,6 +404,19 @@ Phase 1–5 已實機驗證，**Phase 6（FDS 擴充音源）仍是計畫**。
 絕不能放在那個迴圈裡**。codepoint 只在 `putText()` 解析一次成字形索引存進
 儲存格，掃描線那層只做算術。照抄參考實作的每格二分搜尋，每幀會變成十萬次查表。
 
+### 2026-08：偏移編譯，讓 infoNES 能被開機載入器載入
+
+| 階段 | 內容 |
+|---|---|
+| 起因 | 掌機要做「開機從 SD 卡選韌體」的選單，載入器必須佔用 `0x10000000` |
+| 改動 | 本體改 link 到 `0x10004000`、丟掉自己的 boot2、`NES_FILE_ADDR` 一起往上推 16KB |
+| 產出 | `infoNES_standalone.uf2`（跳板 + 本體），USB 拖進去或放 SD 卡都能用 |
+| 驗證 | 實機跑通整條鏈；並確認預設模式輸出與改動前逐項一致 |
+
+預設關閉（`LOADER_OFFSET_BUILD`），不加參數的話編譯流程完全不變。
+完整的前因後果、踩到的三個坑、以及那個「預設編譯餘裕其實只剩 4 KB」的發現，
+見上面「[搭配開機載入器](#搭配開機載入器--building-for-the-boot-loader)」。
+
 ### 一個值得記下來的方法論
 
 跳躍音效走音那題連錯兩次，都是建立在「它一定走方波 1 + sweep」這個
@@ -305,6 +459,7 @@ filenames read off the SD card.
   省下 57 KB —— 長檔名走 UTF-16↔UTF-8，本來就用不到日文那張表。
 - Flash 用量 296.5 KB → **450.8 KB / 512 KB**。`NES_FILE_ADDR` 與其下的存檔
   slot 都沒有移動，已燒錄的 ROM 與存檔不受影響。
+  （偏移模式是例外：那裡整個區域往上推了 16KB，見「搭配開機載入器」。）
 
 11 px 是這套字型的先天上限：`國` `国` 這類筆畫少的很清楚，`選` `體` 這類筆畫
 多的會糊。要更清晰就得換 16×16 字型，那需要約 300 KB，得先把 `NES_FILE_ADDR`

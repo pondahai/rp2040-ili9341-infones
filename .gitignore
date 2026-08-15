@@ -11,3 +11,7 @@ disksys.rom
 # Build output
 build/
 build_*/
+
+# 偏移模式與預設模式並存時的 build 目錄
+build_offset/
+build_default/

@@ -110,3 +110,94 @@ target_link_libraries(infoNES
 
 pico_add_extra_outputs(infoNES)
 
+# ---------------------------------------------------------------------------
+# 開機載入器支援 (預設關閉)
+#
+# 打開之後,image 會 link 到 0x10004000 而不是 0x10000000,前面 16KB 讓給
+# rp2040-retro-loader 的載入器(從 SD 卡載入時)或跳板(USB 直接燒錄時)。
+#
+#   cmake .. -DLOADER_OFFSET_BUILD=ON -DLOADER_PATH=<rp2040-retro-loader 的路徑>
+#
+# 為什麼不能只是把檔案往後搬: RP2040 是 XIP,所有資料位址在編譯時就寫死在
+# 機器碼裡了,搬 bytes 只會讓每個指標都指向錯的地方。只能重新 link。
+#
+# 產出兩個檔案:
+#   infoNES.uf2            只有本體,前 16KB 是空的 —— 不能單獨燒錄
+#   infoNES_standalone.uf2 跳板 + 本體 —— USB 拖進去或放 SD 卡給載入器都可以
+#
+# 預設關閉,所以原本的 build 流程完全不受影響。
+# ---------------------------------------------------------------------------
+option(LOADER_OFFSET_BUILD "Link at 0x10004000 for use with rp2040-retro-loader" OFF)
+
+if(LOADER_OFFSET_BUILD)
+    # 預設假設 loader 的 checkout 跟這個倉庫並排
+    set(LOADER_PATH "${CMAKE_CURRENT_LIST_DIR}/../../../rp2040-retro-loader"
+        CACHE PATH "rp2040-retro-loader 的路徑")
+
+    set(LOADER_APP_LD "${LOADER_PATH}/app/memmap_app.ld")
+    if(NOT EXISTS "${LOADER_APP_LD}")
+        message(FATAL_ERROR
+            "找不到 ${LOADER_APP_LD}\n"
+            "請用 -DLOADER_PATH=<rp2040-retro-loader 的路徑> 指定。")
+    endif()
+
+    pico_set_linker_script(infoNES "${LOADER_APP_LD}")
+    message("LOADER_OFFSET_BUILD : ON  (link 到 0x10004000)")
+
+    # 本體往後推 16KB 之後,尾巴會壓到 ROM 儲存區(預設 0x10080000)與從那裡
+    # 往下長的 NVRAM 存檔槽。把 ROM 區一起往上推同樣的 16KB,維持跟預設
+    # 編譯一樣的相對佈局。代價是 ROM 可用空間少 16KB(還剩約 1.5MB)。
+    set(NES_FILE_ADDR_OFFSET 0x10084000)
+    target_compile_definitions(infoNES PRIVATE
+        NES_FILE_ADDR_OVERRIDE=${NES_FILE_ADDR_OFFSET})
+    message("NES_FILE_ADDR       : ${NES_FILE_ADDR_OFFSET} (偏移模式)")
+
+    # 跳板要先在 loader 那邊編過才有。沒有的話只是不做合併,不擋 build ——
+    # 偏移版本體本身仍然是有效的產物(給載入器用)。
+    set(LOADER_TRAMPOLINE "${LOADER_PATH}/build/trampoline.uf2"
+        CACHE FILEPATH "跳板的 uf2")
+
+    if(EXISTS "${LOADER_TRAMPOLINE}")
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_custom_command(TARGET infoNES POST_BUILD
+            COMMAND ${Python3_EXECUTABLE}
+                    "${LOADER_PATH}/tools/merge_uf2.py"
+                    "${LOADER_TRAMPOLINE}"
+                    $<TARGET_FILE_DIR:infoNES>/infoNES.uf2
+                    -o $<TARGET_FILE_DIR:infoNES>/infoNES_standalone.uf2
+            COMMENT "合併跳板與本體 -> infoNES_standalone.uf2"
+            VERBATIM
+        )
+    else()
+        message(WARNING
+            "找不到跳板 ${LOADER_TRAMPOLINE},略過合併步驟。\n"
+            "infoNES.uf2 仍然可以放進 SD 卡給載入器用,但不能單獨燒錄。\n"
+            "要產生 standalone 版,請先在 rp2040-retro-loader 執行一次 build。")
+    endif()
+endif()
+
+
+# ---------------------------------------------------------------------------
+# flash 佈局檢查 (兩種模式都跑)
+#
+# image 尾巴、NVRAM 存檔槽、ROM 儲存區這三者的相對位置從來沒有被檢查過,
+# 只是「剛好」不重疊 —— 預設模式的餘裕其實只有約 4KB。偏移模式第一次
+# 編出來就撞上了。與其等到燒進去黑畫面才查,不如在 build 期算一次。
+# ---------------------------------------------------------------------------
+if(LOADER_OFFSET_BUILD)
+    set(INFONES_FLASH_BASE 0x10004000)
+    set(INFONES_ROM_ADDR   ${NES_FILE_ADDR_OFFSET})
+else()
+    set(INFONES_FLASH_BASE 0x10000000)
+    set(INFONES_ROM_ADDR   0x10080000)
+endif()
+
+add_custom_command(TARGET infoNES POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DIMAGE=$<TARGET_FILE_DIR:infoNES>/infoNES.bin
+            -DBASE=${INFONES_FLASH_BASE}
+            -DNES_FILE_ADDR=${INFONES_ROM_ADDR}
+            -DSRAM_SIZE=0x2000
+            -P ${CMAKE_CURRENT_LIST_DIR}/check_flash_layout.cmake
+    VERBATIM
+)

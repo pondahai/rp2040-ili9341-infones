@@ -255,7 +255,20 @@ namespace
 
 //    std::unique_ptr<dvi::DVI> dvi_;
 
-    static constexpr uintptr_t NES_FILE_ADDR = 0x10080000;
+    // 選中的 ROM 被 menu.cpp 燒在這個位址,NVRAM 存檔槽則從這裡往下長
+    // (getCurrentNVRAMAddr(): NES_FILE_ADDR - SRAM_SIZE * (slot + 1))。
+    //
+    // 偏移編譯模式(LOADER_OFFSET_BUILD)會把整份 image 往後推 16KB,binary
+    // 的尾巴就會壓到這塊區域 —— 開機時把自己的 .data 初值讀成 ROM,選遊戲
+    // 時還會 erase 掉那份初值。所以偏移模式要把這個位址一起往上推,
+    // CMakeLists.txt 會定義 NES_FILE_ADDR_OVERRIDE。
+    //
+    // CMake 有一道 build 期檢查(check_flash_layout.cmake)會擋下重疊,
+    // 改動 image 大小或這個位址時請留意它的輸出。
+#ifndef NES_FILE_ADDR_OVERRIDE
+#define NES_FILE_ADDR_OVERRIDE 0x10080000
+#endif
+    static constexpr uintptr_t NES_FILE_ADDR = NES_FILE_ADDR_OVERRIDE;
 
    ROMSelector romSelector_;
    // util::ExclusiveProc exclProc_;
