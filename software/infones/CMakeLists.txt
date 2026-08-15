@@ -144,6 +144,14 @@ if(LOADER_OFFSET_BUILD)
     pico_set_linker_script(infoNES "${LOADER_APP_LD}")
     message("LOADER_OFFSET_BUILD : ON  (link 到 0x10004000)")
 
+    # 本體往後推 16KB 之後,尾巴會壓到 ROM 儲存區(預設 0x10080000)與從那裡
+    # 往下長的 NVRAM 存檔槽。把 ROM 區一起往上推同樣的 16KB,維持跟預設
+    # 編譯一樣的相對佈局。代價是 ROM 可用空間少 16KB(還剩約 1.5MB)。
+    set(NES_FILE_ADDR_OFFSET 0x10084000)
+    target_compile_definitions(infoNES PRIVATE
+        NES_FILE_ADDR_OVERRIDE=${NES_FILE_ADDR_OFFSET})
+    message("NES_FILE_ADDR       : ${NES_FILE_ADDR_OFFSET} (偏移模式)")
+
     # 跳板要先在 loader 那邊編過才有。沒有的話只是不做合併,不擋 build ——
     # 偏移版本體本身仍然是有效的產物(給載入器用)。
     set(LOADER_TRAMPOLINE "${LOADER_PATH}/build/trampoline.uf2"
@@ -168,3 +176,28 @@ if(LOADER_OFFSET_BUILD)
     endif()
 endif()
 
+
+# ---------------------------------------------------------------------------
+# flash 佈局檢查 (兩種模式都跑)
+#
+# image 尾巴、NVRAM 存檔槽、ROM 儲存區這三者的相對位置從來沒有被檢查過,
+# 只是「剛好」不重疊 —— 預設模式的餘裕其實只有約 4KB。偏移模式第一次
+# 編出來就撞上了。與其等到燒進去黑畫面才查,不如在 build 期算一次。
+# ---------------------------------------------------------------------------
+if(LOADER_OFFSET_BUILD)
+    set(INFONES_FLASH_BASE 0x10004000)
+    set(INFONES_ROM_ADDR   ${NES_FILE_ADDR_OFFSET})
+else()
+    set(INFONES_FLASH_BASE 0x10000000)
+    set(INFONES_ROM_ADDR   0x10080000)
+endif()
+
+add_custom_command(TARGET infoNES POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DIMAGE=$<TARGET_FILE_DIR:infoNES>/infoNES.bin
+            -DBASE=${INFONES_FLASH_BASE}
+            -DNES_FILE_ADDR=${INFONES_ROM_ADDR}
+            -DSRAM_SIZE=0x2000
+            -P ${CMAKE_CURRENT_LIST_DIR}/check_flash_layout.cmake
+    VERBATIM
+)
