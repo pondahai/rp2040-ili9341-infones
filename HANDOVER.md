@@ -111,6 +111,15 @@ software/infones/mapper/InfoNES_Mapper_020.cpp    1030 行，FDS mapper 全部�
 > 該症狀已隨 7.8 一併消失，且它的實證機制與 ring buffer 無關，**那條升級理由是誤判**。
 > 4.2 仍值得修（整機凍結且無看門狗可救），但別再拿 7.7 當它的佐證。
 
+### 4.5 存檔搬到 SD 卡（起草於 2026-08-05，未完成）
+
+`nvram_sd_plan.md` 有完整計畫。輔助函式（`nvram_path.h`）與主機端回歸測試
+（`software/tools/nvram_save_test/`）已經寫好，**但還沒接進韌體，也還沒入版控**。
+
+動機是一個目前存在的缺陷：實際上只有一個存檔槽（`romSelector_` 走
+`singleROM_` 那條路時 `getCurrentNVRAMSlot()` 永遠回傳 0），
+**換一款遊戲再存檔，上一款的進度就沒了，而且沒有任何提示。**
+
 ### 4.4 其他
 
 - `claude_opus_5_analysis.md` 第 4 節還有 4.4（SPI 同步防護）、4.5（節流機制重複）等未處理項
